@@ -1,0 +1,43 @@
+name: Iceberg Extension Distribution (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      exclude_archs:
+        description: "Architectures to exclude (semicolon-separated)"
+        required: false
+        type: string
+        default: "windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads"
+      duckdb_version:
+        description: "DuckDB version to build against"
+        required: false
+        type: string
+        default: "v1.5.0"
+      ci_tools_version:
+        description: "Extension CI tools version to use"
+        required: false
+        type: string
+        default: "v1.5.0p"
+      override_git_describe:
+        description: "Override git describe for version detection"
+        required: false
+        type: string
+        default: "v1.5.0"
+      build_ref:
+        description: "Git ref to checkout and build"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build-iceberg-extension:
+    name: Build Iceberg Extension
+    uses: TobikoData/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.0p
+    with:
+      extension_name: iceberg
+      duckdb_version: ${{ inputs.duckdb_version || 'v1.5.0' }}
+      ci_tools_version: ${{ inputs.ci_tools_version || 'v1.5.0p' }}
+      override_ci_tools_repository: TobikoData/extension-ci-tools
+      override_git_describe: ${{ inputs.override_git_describe || 'v1.5.0' }}
+      extra_toolchains: python3
+      exclude_archs: ${{ inputs.exclude_archs || 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads' }}
