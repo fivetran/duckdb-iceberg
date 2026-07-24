@@ -1,0 +1,183 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/views/test_view_errors.test
+# description: test error handling for view operations in iceberg catalog
+# group: [views]
+
+require-env ICEBERG_SERVER_AVAILABLE
+
+require avro
+
+require parquet
+
+require iceberg
+
+require httpfs
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+set logging_level='debug'
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.view_errors_schema.error_test_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.view_errors_schema.qualified_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.view_errors_schema.view_on_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.view_errors_schema.error_test_table;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.view_errors_schema.error_test_table2;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.view_errors_schema;
+
+statement ok
+create schema my_datalake.view_errors_schema;
+
+statement ok
+use my_datalake.view_errors_schema;
+
+# Error: Cannot create view on non-existent table
+statement error
+create view error_view_1 as select * from non_existent_table;
+----
+<REGEX>:.*does not exist.*
+
+# Error: Cannot query non-existent view
+statement error
+select * from non_existent_view;
+----
+<REGEX>:.*does not exist.*
+
+# Error: Cannot drop non-existent view (without IF EXISTS)
+statement error
+drop view non_existent_view;
+----
+<REGEX>:.*does not exist.*
+
+# Create base table
+statement ok
+DROP TABLE IF EXISTS my_datalake.view_errors_schema.error_test_table;
+
+statement ok
+create table error_test_table (id int, value varchar);
+
+statement ok
+insert into error_test_table values (1, 'test');
+
+# Create a view
+statement ok
+DROP VIEW IF EXISTS my_datalake.view_errors_schema.error_test_view;
+
+statement ok
+create view error_test_view as select * from error_test_table;
+
+# Error: Cannot create view with same name
+statement error
+create view error_test_view as select * from error_test_table;
+----
+<REGEX>:.*already exists.*
+
+# But CREATE VIEW IF NOT EXISTS should succeed
+#statement ok
+#create view if not exists error_test_view as select * from error_test_table;
+
+# Error: Cannot create view in non-existent schema
+statement error
+create view my_datalake.non_existent_schema.view1 as select * from error_test_table;
+----
+<REGEX>:.*(does not exist|not found).*
+
+# Error: Invalid SQL in view definition
+statement error
+create view syntax_error_view as select * from;
+----
+<REGEX>:.*syntax error.*
+
+# Error: Cannot reference columns that don't exist
+statement error
+create view bad_column_view as select non_existent_column from error_test_table;
+----
+<REGEX>:.*Referenced column "non_existent_column" not found.*
+
+# Test view with ambiguous column names
+statement ok
+DROP TABLE IF EXISTS my_datalake.view_errors_schema.error_test_table2;
+
+statement ok
+create table error_test_table2 (id int, name varchar);
+
+statement error
+create view ambiguous_view as
+select id from error_test_table, error_test_table2;
+----
+<REGEX>:.*Ambiguous reference to column name "id".*
+
+# Create view with qualified names (should work)
+statement ok
+DROP VIEW IF EXISTS my_datalake.view_errors_schema.qualified_view;
+
+statement ok
+create view qualified_view as
+select error_test_table.id as id1, error_test_table2.id as id2
+from error_test_table, error_test_table2;
+
+# Drop the view
+statement ok
+drop view qualified_view;
+
+# Error: Cannot drop table using DROP VIEW
+statement error
+drop view error_test_table;
+----
+<REGEX>:.*
+
+# Error: Cannot drop view using DROP TABLE
+statement error
+drop table error_test_view;
+----
+<REGEX>:.*
+
+# Test view on view
+statement ok
+DROP VIEW IF EXISTS my_datalake.view_errors_schema.view_on_view;
+
+statement ok
+create view view_on_view as select * from error_test_view;
+
+# This should work
+query II
+select * from view_on_view;
+----
+1	test
+
+# Drop base view
+statement ok
+drop view error_test_view;
+
+# Error: view_on_view should fail now since base view is gone
+statement error
+select * from view_on_view;
+----
+<REGEX>:.*does not exist.*
+
+# Clean up
+statement ok
+drop view view_on_view;
+
+statement ok
+drop table error_test_table2;
+
+statement ok
+drop table error_test_table;
+

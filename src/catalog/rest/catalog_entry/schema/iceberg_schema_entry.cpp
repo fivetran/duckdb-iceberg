@@ -26,7 +26,7 @@ namespace duckdb {
 
 IcebergSchemaEntry::IcebergSchemaEntry(Catalog &catalog, CreateSchemaInfo &info)
     : SchemaCatalogEntry(catalog, info), namespace_items(IRCAPI::ParseSchemaName(info.schema)), exists(true),
-      tables(*this) {
+      tables(*this), views(*this) {
 }
 
 IcebergSchemaEntry::~IcebergSchemaEntry() {
@@ -42,9 +42,36 @@ IcebergTransaction &GetICTransaction(CatalogTransaction transaction) {
 bool IcebergSchemaEntry::HandleCreateConflict(CatalogTransaction &transaction, CatalogType catalog_type,
                                               const string &entry_name, OnCreateConflict on_conflict) {
 	auto existing_entry = GetEntry(transaction, catalog_type, entry_name);
+	auto &iceberg_transaction = GetICTransaction(transaction);
+	auto table_key = IcebergTableInformation::GetTableKey(namespace_items, entry_name);
+	auto latest_state = iceberg_transaction.GetLatestTableState(table_key);
+
 	if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
-		throw NotImplementedException(
-		    "CREATE OR REPLACE not supported in DuckDB-Iceberg. Please use separate Drop and Create Statements");
+		if (latest_state && latest_state->IsDroppedOrRenamed()) {
+			throw NotImplementedException(
+			    "Cannot replace Iceberg table '%s' that was previously deleted in the same transaction", entry_name);
+		}
+
+		auto entry_it = tables.GetEntries().find(entry_name);
+		if (entry_it != tables.GetEntries().end() && latest_state && latest_state->IsAlive() &&
+		    latest_state->GetInfo().HasTransactionUpdates()) {
+			throw NotImplementedException(
+			    "Cannot replace Iceberg table '%s' that has pending operations in the same transaction. "
+			    "Commit or rollback the transaction before replacing the table.",
+			    entry_name);
+		}
+
+		if (existing_entry) {
+			auto &context = transaction.GetContext();
+			auto &ic_catalog = catalog.Cast<IcebergCatalog>();
+
+			// Mark as replaced in transaction so we don't accidentally try to query it
+			iceberg_transaction.replaced_table_names.insert(entry_name);
+
+			IRCAPI::CommitTableDelete(context, ic_catalog, namespace_items, entry_name);
+			tables.GetEntriesMutable().erase(entry_name);
+		}
+		return true;
 	}
 	if (!existing_entry) {
 		// If there is no existing entry, make sure the entry has not been deleted in this transaction.
@@ -106,6 +133,12 @@ void IcebergSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 }
 
 void IcebergSchemaEntry::DropEntry(ClientContext &context, DropInfo &info, bool delete_entry) {
+	if (info.type == CatalogType::VIEW_ENTRY) {
+		auto &ic_catalog = catalog.Cast<IcebergCatalog>();
+		views.DropEntry(context, ic_catalog, *this, info);
+		return;
+	}
+
 	auto table_name = info.name;
 	// find if info has a table name, if so look for it in
 	auto table_info_it = tables.GetEntries().find(table_name);
@@ -158,7 +191,21 @@ string GetUCCreateView(CreateViewInfo &info) {
 }
 
 optional_ptr<CatalogEntry> IcebergSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
-	throw NotImplementedException("Create View");
+	auto &context = transaction.GetContext();
+	auto &ic_catalog = ParentCatalog().Cast<IcebergCatalog>();
+
+	if (!views.CreateNewEntry(context, ic_catalog, *this, info)) {
+		D_ASSERT(info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT);
+		return nullptr;
+	}
+
+	auto lookup_info = EntryLookupInfo(CatalogType::VIEW_ENTRY, info.view_name);
+	auto entry = views.GetEntry(context, lookup_info);
+
+	D_ASSERT(entry);
+	D_ASSERT(entry->type == CatalogType::VIEW_ENTRY);
+
+	return entry;
 }
 
 optional_ptr<CatalogEntry> IcebergSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
@@ -738,7 +785,13 @@ void IcebergSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (!CatalogTypeIsSupported(type)) {
 		return;
 	}
-	GetCatalogSet(type).Scan(context, callback);
+	if (type == CatalogType::TABLE_ENTRY) {
+		tables.Scan(context, callback);
+		// duckdb uses the table type for views in some places, so scan views as well when scanning tables
+		views.Scan(context, callback);
+	} else if (type == CatalogType::VIEW_ENTRY) {
+		views.Scan(context, callback);
+	}
 }
 void IcebergSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
 	throw NotImplementedException("Scan without context not supported");
@@ -752,7 +805,16 @@ optional_ptr<CatalogEntry> IcebergSchemaEntry::LookupEntry(CatalogTransaction tr
 	}
 	auto &context = transaction.GetContext();
 	auto &ic_catalog = catalog.Cast<IcebergCatalog>();
-	auto table_entry = GetCatalogSet(type).GetEntry(context, lookup_info);
+	optional_ptr<CatalogEntry> table_entry = nullptr;
+	if (type == CatalogType::TABLE_ENTRY) {
+		table_entry = tables.GetEntry(context, lookup_info);
+		if (!table_entry) {
+			// duckdb uses the table type for views in some places, so try looking in views as well
+			table_entry = views.GetEntry(context, lookup_info);
+		}
+	} else if (type == CatalogType::VIEW_ENTRY) {
+		table_entry = views.GetEntry(context, lookup_info);
+	}
 	if (!table_entry) {
 		// verify the schema exists
 		if (!IRCAPI::VerifySchemaExistence(context, ic_catalog, name)) {
@@ -764,16 +826,6 @@ optional_ptr<CatalogEntry> IcebergSchemaEntry::LookupEntry(CatalogTransaction tr
 		}
 	}
 	return table_entry;
-}
-
-IcebergTableSet &IcebergSchemaEntry::GetCatalogSet(CatalogType type) {
-	switch (type) {
-	case CatalogType::TABLE_ENTRY:
-	case CatalogType::VIEW_ENTRY:
-		return tables;
-	default:
-		throw InternalException("Type not supported for GetCatalogSet");
-	}
 }
 
 void IcebergSchemaEntry::LoadProperties(ClientContext &context) {

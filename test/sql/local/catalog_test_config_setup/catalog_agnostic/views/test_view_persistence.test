@@ -1,0 +1,209 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/views/test_view_persistence.test
+# description: test view metadata persistence across catalog reattachment
+# group: [views]
+
+require-env ICEBERG_SERVER_AVAILABLE
+
+require avro
+
+require parquet
+
+require iceberg
+
+require httpfs
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+set logging_level='debug'
+
+statement ok
+create schema if not exists my_datalake.persistence_schema;
+
+statement ok
+use my_datalake.persistence_schema;
+
+# Create base table
+statement ok
+DROP VIEW IF EXISTS my_datalake.persistence_schema.persistence_view_3;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.persistence_schema.persistence_view_2;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.persistence_schema.persistence_view_1;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.persistence_schema.persistence_table;
+
+statement ok
+create table persistence_table (id int, data varchar, timestamp timestamp);
+
+statement ok
+insert into persistence_table values
+    (1, 'first', '2024-01-01 10:00:00'),
+    (2, 'second', '2024-01-02 11:00:00'),
+    (3, 'third', '2024-01-03 12:00:00');
+
+# Create views
+statement ok
+DROP VIEW IF EXISTS my_datalake.persistence_schema.persistence_view_1;
+
+statement ok
+create view persistence_view_1 as
+select id, data from persistence_table where id <= 2;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.persistence_schema.persistence_view_2;
+
+statement ok
+create view persistence_view_2 as
+select id, timestamp from persistence_table where id > 1;
+
+# Verify views work
+query II
+select * from persistence_view_1 order by id;
+----
+1	first
+2	second
+
+query II
+select * from persistence_view_2 order by id;
+----
+2	2024-01-02 11:00:00
+3	2024-01-03 12:00:00
+
+# Verify SHOW ALL TABLES includes both table and views
+query IIIIII
+select * from (show all tables) where schema = 'persistence_schema' order by name;
+----
+my_datalake	persistence_schema	persistence_table	[id, data, timestamp]	[INTEGER, VARCHAR, TIMESTAMP]	0
+my_datalake	persistence_schema	persistence_view_1	[id, data]	[INTEGER, VARCHAR]	0
+my_datalake	persistence_schema	persistence_view_2	[id, timestamp]	[INTEGER, TIMESTAMP]	0
+
+# Detach and reattach catalog to test persistence
+statement ok
+use memory.main;
+
+statement ok
+detach my_datalake;
+
+statement ok
+ATTACH '' AS my_datalake (TYPE ICEBERG, CLIENT_ID 'admin', CLIENT_SECRET 'password', ENDPOINT 'http://127.0.0.1:8181');
+
+statement ok
+use my_datalake.persistence_schema;
+
+# Views should still be accessible after reattachment
+query II
+select * from persistence_view_1 order by id;
+----
+1	first
+2	second
+
+query II
+select * from persistence_view_2 order by id;
+----
+2	2024-01-02 11:00:00
+3	2024-01-03 12:00:00
+
+# Verify SHOW ALL TABLES still includes views after reattachment
+query IIIIII
+select * from (show all tables) where schema = 'persistence_schema' order by name;
+----
+my_datalake	persistence_schema	persistence_table	[id, data, timestamp]	[INTEGER, VARCHAR, TIMESTAMP]	0
+my_datalake	persistence_schema	persistence_view_1	[id, data]	[INTEGER, VARCHAR]	0
+my_datalake	persistence_schema	persistence_view_2	[id, timestamp]	[INTEGER, TIMESTAMP]	0
+
+# Add more data to base table
+statement ok
+insert into persistence_table values (4, 'fourth', '2024-01-04 13:00:00');
+
+# Views should reflect new data
+query II
+select * from persistence_view_2 order by id;
+----
+2	2024-01-02 11:00:00
+3	2024-01-03 12:00:00
+4	2024-01-04 13:00:00
+
+# Create a new view after reattachment
+statement ok
+create view persistence_view_3 as
+select count(*) as total, max(timestamp) as latest
+from persistence_table;
+
+query II
+select * from persistence_view_3;
+----
+4	2024-01-04 13:00:00
+
+# Detach and reattach again
+statement ok
+use memory.main;
+
+statement ok
+detach my_datalake;
+
+statement ok
+ATTACH '' AS my_datalake (TYPE ICEBERG, CLIENT_ID 'admin', CLIENT_SECRET 'password', ENDPOINT 'http://127.0.0.1:8181');
+
+statement ok
+use my_datalake.persistence_schema;
+
+# All three views should be accessible
+query II
+select * from persistence_view_1 order by id;
+----
+1	first
+2	second
+
+query II
+select * from persistence_view_2 order by id;
+----
+2	2024-01-02 11:00:00
+3	2024-01-03 12:00:00
+4	2024-01-04 13:00:00
+
+query II
+select * from persistence_view_3;
+----
+4	2024-01-04 13:00:00
+
+# Verify SHOW ALL TABLES includes all three views after second reattachment
+query IIIIII
+select * from (show all tables) where schema = 'persistence_schema' order by name;
+----
+my_datalake	persistence_schema	persistence_table	[id, data, timestamp]	[INTEGER, VARCHAR, TIMESTAMP]	0
+my_datalake	persistence_schema	persistence_view_1	[id, data]	[INTEGER, VARCHAR]	0
+my_datalake	persistence_schema	persistence_view_2	[id, timestamp]	[INTEGER, TIMESTAMP]	0
+my_datalake	persistence_schema	persistence_view_3	[total, latest]	[BIGINT, TIMESTAMP]	0
+
+# Test that view definitions are correct by checking information_schema
+query I
+select count(*) from information_schema.tables
+where table_schema = 'persistence_schema'
+and table_name in ('persistence_view_1', 'persistence_view_2', 'persistence_view_3')
+and table_type = 'VIEW';
+----
+3
+
+# Cleanup
+statement ok
+drop view persistence_view_3;
+
+statement ok
+drop view persistence_view_2;
+
+statement ok
+drop view persistence_view_1;
+
+statement ok
+drop table persistence_table;
+

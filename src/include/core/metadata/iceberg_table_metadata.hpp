@@ -87,6 +87,7 @@ public:
 	const case_insensitive_map_t<string> &GetTableProperties() const;
 	string GetTableProperty(string property_string) const;
 	bool PropertiesAllowPositionalDeletes(IcebergSnapshotOperationType operation_type) const;
+	bool GetParallelWritesEnabled() const;
 	string ToJSON() const;
 	void WriteMetadata(ClientContext &context, const string &path) const;
 	void WriteVersionHint(ClientContext &context, const string &path, const string &metadata_json_path) const;

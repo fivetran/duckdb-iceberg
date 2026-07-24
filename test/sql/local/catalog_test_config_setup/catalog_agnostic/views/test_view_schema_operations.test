@@ -1,0 +1,211 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/views/test_view_schema_operations.test
+# description: test view operations across different schemas
+# group: [views]
+
+require-env ICEBERG_SERVER_AVAILABLE
+
+require avro
+
+require parquet
+
+require iceberg
+
+require httpfs
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+set logging_level='debug'
+
+# Create schemas
+statement ok
+create schema if not exists my_datalake.schema_a;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.schema_b.view_in_b;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.schema_b.view_on_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.schema_b.table_b;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.schema_b;
+
+statement ok
+create schema my_datalake.schema_b;
+
+# Create table in schema_a
+statement ok
+DROP TABLE IF EXISTS my_datalake.schema_a.table_a;
+
+statement ok
+create table my_datalake.schema_a.table_a (id int, name varchar, amount decimal(10,2));
+
+statement ok
+insert into my_datalake.schema_a.table_a values
+    (1, 'alpha', 100.00),
+    (2, 'beta', 200.00),
+    (3, 'gamma', 300.00);
+
+# Create view in schema_a referencing table in schema_a
+statement ok
+DROP VIEW IF EXISTS my_datalake.schema_a.view_in_a;
+
+statement ok
+create view my_datalake.schema_a.view_in_a as
+select * from my_datalake.schema_a.table_a where id > 1;
+
+query III
+select * from my_datalake.schema_a.view_in_a order by id;
+----
+2	beta	200.00
+3	gamma	300.00
+
+# Create view in schema_b referencing table in schema_a (cross-schema reference)
+statement ok
+DROP VIEW IF EXISTS my_datalake.schema_b.view_in_b;
+
+statement ok
+create view my_datalake.schema_b.view_in_b as
+select id, name from my_datalake.schema_a.table_a where amount > 150;
+
+query II
+select * from my_datalake.schema_b.view_in_b order by id;
+----
+2	beta
+3	gamma
+
+# Create table in schema_b
+statement ok
+DROP TABLE IF EXISTS my_datalake.schema_b.table_b;
+
+statement ok
+create table my_datalake.schema_b.table_b (id int, category varchar);
+
+statement ok
+insert into my_datalake.schema_b.table_b values (1, 'type_x'), (2, 'type_y'), (3, 'type_z');
+
+# Create view joining tables from different schemas
+statement ok
+DROP VIEW IF EXISTS my_datalake.schema_a.cross_schema_join_view;
+
+statement ok
+create view my_datalake.schema_a.cross_schema_join_view as
+select a.id, a.name, b.category
+from my_datalake.schema_a.table_a a
+join my_datalake.schema_b.table_b b on a.id = b.id;
+
+query III
+select * from my_datalake.schema_a.cross_schema_join_view order by id;
+----
+1	alpha	type_x
+2	beta	type_y
+3	gamma	type_z
+
+# Test using different current schema
+statement ok
+use my_datalake.schema_a;
+
+# Can reference local view without schema prefix
+query III
+select * from view_in_a order by id;
+----
+2	beta	200.00
+3	gamma	300.00
+
+# Can reference cross-schema view with prefix
+query II
+select * from my_datalake.schema_b.view_in_b order by id;
+----
+2	beta
+3	gamma
+
+# Switch to schema_b
+statement ok
+use my_datalake.schema_b;
+
+# Can reference local view without schema prefix
+query II
+select * from view_in_b order by id;
+----
+2	beta
+3	gamma
+
+# Can reference cross-schema view with prefix
+query III
+select * from my_datalake.schema_a.view_in_a order by id;
+----
+2	beta	200.00
+3	gamma	300.00
+
+# Create view on view across schemas
+statement ok
+DROP VIEW IF EXISTS my_datalake.schema_b.view_on_view;
+
+statement ok
+create view my_datalake.schema_b.view_on_view as
+select * from my_datalake.schema_a.view_in_a where id = 2;
+
+query III
+select * from my_datalake.schema_b.view_on_view;
+----
+2	beta	200.00
+
+# Test SHOW ALL TABLES in different schemas
+statement ok
+use my_datalake.schema_a;
+
+statement ok
+show all tables;
+
+statement ok
+use my_datalake.schema_b;
+
+statement ok
+show all tables;
+
+# Test information_schema queries
+query I
+select count(*) from information_schema.tables
+where table_schema = 'schema_a'
+and table_type = 'VIEW';
+----
+2
+
+query I
+select count(*) from information_schema.tables
+where table_schema = 'schema_b'
+and table_type = 'VIEW';
+----
+2
+
+# Cleanup - order matters due to dependencies
+statement ok
+drop view my_datalake.schema_b.view_on_view;
+
+statement ok
+drop view my_datalake.schema_a.cross_schema_join_view;
+
+statement ok
+drop view my_datalake.schema_b.view_in_b;
+
+statement ok
+drop view my_datalake.schema_a.view_in_a;
+
+statement ok
+drop table my_datalake.schema_b.table_b;
+
+statement ok
+drop table my_datalake.schema_a.table_a;
+
+statement ok
+drop schema my_datalake.schema_b;
+

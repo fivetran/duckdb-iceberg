@@ -121,6 +121,8 @@ public:
 
 	case_insensitive_set_t created_secrets;
 	case_insensitive_set_t looked_up_entries;
+	//! Storing replaced tables as strings since the entry will be deallocated
+	case_insensitive_set_t replaced_table_names;
 	mutex lock;
 
 	case_insensitive_map_t<SchemaPropertyUpdates> schema_property_updates;

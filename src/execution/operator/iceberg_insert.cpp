@@ -875,7 +875,7 @@ IcebergCopyOptions IcebergInsert::GetCopyOptions(ClientContext &context, const I
 	StripTrailingSeparator(fs, result.file_path);
 	result.file_extension = file_format;
 	result.overwrite_mode = CopyOverwriteMode::COPY_OVERWRITE_OR_IGNORE;
-	result.per_thread_output = false;
+	result.per_thread_output = copy_input.table_metadata.GetParallelWritesEnabled();
 	result.write_partition_columns = true;
 	result.return_type = CopyFunctionReturnType::WRITTEN_FILE_STATISTICS;
 	// Virtual columns come before partition columns, matching the chunk layout:
@@ -982,7 +982,10 @@ PhysicalOperator &IcebergInsert::PlanInsert(ClientContext &context, PhysicalPlan
 	vector<LogicalType> return_types;
 	// the one return value is how many rows we are inserting
 	return_types.emplace_back(LogicalType::BIGINT);
-	return planner.Make<IcebergInsert>(return_types, table);
+	auto &insert_op = planner.Make<IcebergInsert>(return_types, table);
+	auto &insert = insert_op.Cast<IcebergInsert>();
+	insert.parallel_writes_enabled = table.table_info.table_metadata.GetParallelWritesEnabled();
+	return insert;
 }
 
 PhysicalOperator &IcebergCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
@@ -1024,7 +1027,9 @@ PhysicalOperator &IcebergCatalog::PlanInsert(ClientContext &context, PhysicalPla
 
 	// Create Copy Info
 	IcebergCopyInput info(context, table_metadata, schema);
-	auto &insert = planner.Make<IcebergInsert>(op, updated_table_entry, op.column_index_map);
+	auto &insert_op = planner.Make<IcebergInsert>(op, updated_table_entry, op.column_index_map);
+	auto &insert = insert_op.Cast<IcebergInsert>();
+	insert.parallel_writes_enabled = table_metadata.GetParallelWritesEnabled();
 	auto &physical_copy = IcebergInsert::PlanCopyForInsert(context, planner, info, plan);
 	insert.children.push_back(physical_copy);
 
@@ -1070,6 +1075,19 @@ static unique_ptr<IcebergTableMetadata> BuildPlaceholderMetadata(ClientContext &
 	// indices are derived from the same partition_keys/schema and so remain consistent.
 	auto placeholder_spec = IcebergTableInformation::BuildPartitionSpec(create_info.partition_keys, *schema, 0, 1000);
 	metadata->partition_specs.emplace(0, std::move(placeholder_spec));
+
+	// Pass table properties down to metadata
+	if (info.Base().type == CatalogType::TABLE_ENTRY) {
+		auto &create_info = info.Base().Cast<CreateTableInfo>();
+		for (auto &opt : create_info.options) {
+			if (opt.second->type == ExpressionType::VALUE_CONSTANT) {
+				auto &constant_expr = opt.second->Cast<ConstantExpression>();
+				metadata->table_properties[opt.first] = constant_expr.value.ToString();
+			} else {
+				metadata->table_properties[opt.first] = opt.second->ToString();
+			}
+		}
+	}
 	return metadata;
 }
 
@@ -1143,6 +1161,7 @@ PhysicalOperator &IcebergCatalog::PlanCreateTableAs(ClientContext &context, Phys
 	physical_copy.children[0] = create_op;
 
 	auto &insert = planner.Make<IcebergInsert>(op, schema, unique_ptr<BoundCreateTableInfo>()).Cast<IcebergInsert>();
+	insert.parallel_writes_enabled = placeholder_metadata->GetParallelWritesEnabled();
 	insert.create_state = std::move(create_state);
 	insert.children.push_back(physical_copy);
 	return insert;

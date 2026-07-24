@@ -1,0 +1,530 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/views/test_create_or_replace_view.test
+# description: test CREATE OR REPLACE view in iceberg catalog
+# group: [views]
+
+require-env ICEBERG_SERVER_AVAILABLE
+
+require avro
+
+require parquet
+
+require iceberg
+
+require httpfs
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+CALL enable_logging('Iceberg');
+
+statement ok
+set logging_level='debug';
+
+# Initial cleanup: drop any objects left from previous runs (order matters: views before tables before schema)
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.evolving_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.reattach_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.cycle_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.column_order_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.join_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.type_test;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.base_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.cache_test;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.agg_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.schema_test;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.counter;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.my_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.new_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.replace_view_schema.evolving_table;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.replace_view_schema.base2;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.replace_view_schema.base;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.replace_view_schema;
+
+statement ok
+create schema if not exists my_datalake.replace_view_schema;
+
+statement ok
+use my_datalake.replace_view_schema;
+
+# Create a base table to use in views
+statement ok
+DROP TABLE IF EXISTS my_datalake.replace_view_schema.base;
+
+statement ok
+create table base (id int, value double);
+
+statement ok
+insert into base values (1, 10.5), (2, 20.7);
+
+# Test 1: CREATE OR REPLACE on non-existent view (should create the view)
+statement ok
+CREATE OR REPLACE VIEW new_view AS SELECT 1 as col;
+
+query I
+SELECT * FROM new_view;
+----
+1
+
+# Test 2: CREATE OR REPLACE on existing view (should replace with different SQL)
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.my_view;
+
+statement ok
+CREATE VIEW my_view AS SELECT 1 as a;
+
+query I
+SELECT * FROM my_view;
+----
+1
+
+statement ok
+CREATE OR REPLACE VIEW my_view AS SELECT 2 as b;
+
+# Verify new SQL is active
+query I
+SELECT * FROM my_view;
+----
+2
+
+# Test 3: Multiple replacements (version increments)
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.counter;
+
+statement ok
+CREATE VIEW counter AS SELECT 1 as val;
+
+query I
+SELECT * FROM counter;
+----
+1
+
+statement ok
+CREATE OR REPLACE VIEW counter AS SELECT 2 as val;
+
+query I
+SELECT * FROM counter;
+----
+2
+
+statement ok
+CREATE OR REPLACE VIEW counter AS SELECT 3 as val;
+
+query I
+SELECT * FROM counter;
+----
+3
+
+statement ok
+CREATE OR REPLACE VIEW counter AS SELECT 4 as val;
+
+# Verify final version
+query I
+SELECT * FROM counter;
+----
+4
+
+# Test 4: Schema changes during replace (2 columns -> 3 columns)
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.schema_test;
+
+statement ok
+CREATE VIEW schema_test AS SELECT 1 as a, 2 as b;
+
+query II
+SELECT * FROM schema_test;
+----
+1	2
+
+statement ok
+CREATE OR REPLACE VIEW schema_test AS SELECT 1 as x, 2 as y, 3 as z;
+
+# Verify new schema
+query III
+SELECT * FROM schema_test;
+----
+1	2	3
+
+# Test 5: Replace with complex queries
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.agg_view;
+
+statement ok
+CREATE VIEW agg_view AS SELECT COUNT(*) as cnt FROM base;
+
+query I
+SELECT * FROM agg_view;
+----
+2
+
+statement ok
+CREATE OR REPLACE VIEW agg_view AS SELECT SUM(value) as total, AVG(value) as avg FROM base;
+
+# Verify
+query II
+SELECT * FROM agg_view;
+----
+31.2	15.6
+
+# Test 6: Metadata caching scenario (list views, then replace)
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.cache_test;
+
+statement ok
+CREATE VIEW cache_test AS SELECT 1 as val;
+
+query I
+SELECT * FROM cache_test;
+----
+1
+
+# List views (triggers Scan, creates entries without full metadata)
+query I
+SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'replace_view_schema' AND table_type = 'VIEW';
+----
+6
+
+# Now replace (should fetch metadata first if needed)
+statement ok
+CREATE OR REPLACE VIEW cache_test AS SELECT 2 as val;
+
+# Verify
+query I
+SELECT * FROM cache_test;
+----
+2
+
+# Test 7: Replace view that uses base table
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.base_view;
+
+statement ok
+CREATE VIEW base_view AS SELECT id FROM base WHERE value > 15;
+
+query I
+SELECT * FROM base_view ORDER BY id;
+----
+2
+
+statement ok
+CREATE OR REPLACE VIEW base_view AS SELECT id, value FROM base WHERE value > 5;
+
+query II
+SELECT * FROM base_view ORDER BY id;
+----
+1	10.5
+2	20.7
+
+# Test 8: Replace view with different column types
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.type_test;
+
+statement ok
+CREATE VIEW type_test AS SELECT id FROM base;
+
+query I
+SELECT * FROM type_test ORDER BY id;
+----
+1
+2
+
+statement ok
+CREATE OR REPLACE VIEW type_test AS SELECT CAST(id AS VARCHAR) as id_str FROM base;
+
+query I
+SELECT * FROM type_test ORDER BY id_str;
+----
+1
+2
+
+# Test 9: Replace view with join
+statement ok
+DROP TABLE IF EXISTS my_datalake.replace_view_schema.base2;
+
+statement ok
+CREATE TABLE base2 (id int, name varchar);
+
+statement ok
+INSERT INTO base2 VALUES (1, 'alice'), (2, 'bob');
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.join_view;
+
+statement ok
+CREATE VIEW join_view AS SELECT base.id, base.value FROM base;
+
+query II
+SELECT * FROM join_view ORDER BY id;
+----
+1	10.5
+2	20.7
+
+statement ok
+CREATE OR REPLACE VIEW join_view AS SELECT base.id, base.value, base2.name FROM base JOIN base2 ON base.id = base2.id;
+
+query III
+SELECT * FROM join_view ORDER BY id;
+----
+1	10.5	alice
+2	20.7	bob
+
+# Test 10: Replace view with different column order
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.column_order_view;
+
+statement ok
+CREATE VIEW column_order_view AS SELECT id, value FROM base;
+
+query II
+SELECT * FROM column_order_view ORDER BY id;
+----
+1	10.5
+2	20.7
+
+# Replace with swapped column order
+statement ok
+CREATE OR REPLACE VIEW column_order_view AS SELECT value, id FROM base;
+
+# Verify columns are now in different order
+query II
+SELECT * FROM column_order_view ORDER BY id;
+----
+10.5	1
+20.7	2
+
+# Verify we can still query specific columns
+query I
+SELECT id FROM column_order_view ORDER BY id;
+----
+1
+2
+
+query I
+SELECT value FROM column_order_view ORDER BY value;
+----
+10.5
+20.7
+
+# Test 11: Replace view back to original version (version cycling)
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.cycle_view;
+
+statement ok
+CREATE VIEW cycle_view AS SELECT id * 2 as double_id, value FROM base;
+
+query II
+SELECT * FROM cycle_view ORDER BY double_id;
+----
+2	10.5
+4	20.7
+
+# Replace with different computation
+statement ok
+CREATE OR REPLACE VIEW cycle_view AS SELECT id * 10 as ten_times_id, value * 2 as double_value FROM base;
+
+query II
+SELECT * FROM cycle_view ORDER BY ten_times_id;
+----
+10	21.0
+20	41.4
+
+# Replace back to original version (same SQL as first version)
+statement ok
+CREATE OR REPLACE VIEW cycle_view AS SELECT id * 2 as double_id, value FROM base;
+
+# Verify it's back to original behavior
+query II
+SELECT * FROM cycle_view ORDER BY double_id;
+----
+2	10.5
+4	20.7
+
+# Do one more cycle to ensure multiple back-and-forth replacements work
+statement ok
+CREATE OR REPLACE VIEW cycle_view AS SELECT id, value / 2 as half_value FROM base;
+
+query II
+SELECT * FROM cycle_view ORDER BY id;
+----
+1	5.25
+2	10.35
+
+# And back to the original one more time
+statement ok
+CREATE OR REPLACE VIEW cycle_view AS SELECT id * 2 as double_id, value FROM base;
+
+query II
+SELECT * FROM cycle_view ORDER BY double_id;
+----
+2	10.5
+4	20.7
+
+# Test 12: Drop and recreate underlying table with new schema (same column names, different types)
+statement ok
+CREATE TABLE evolving_table (id int, value double);
+
+statement ok
+INSERT INTO evolving_table VALUES (1, 100.5), (2, 200.7);
+
+# Create a view based on the table with int and double columns
+statement ok
+CREATE VIEW evolving_view AS SELECT id, value FROM evolving_table WHERE value > 150;
+
+query II
+SELECT * FROM evolving_view ORDER BY id;
+----
+2	200.7
+
+# Drop the underlying table
+statement ok
+DROP TABLE evolving_table;
+
+# Recreate the table with same column names but different types
+# id changes from int to bigint, value changes from double to bigint
+statement ok
+CREATE TABLE evolving_table (id bigint, value bigint);
+
+statement ok
+INSERT INTO evolving_table VALUES (3000000000, 300), (4000000000, 450), (5000000000, 150);
+
+# Verify the new table data is directly accessible
+query II
+SELECT id, value FROM evolving_table ORDER BY id;
+----
+3000000000	300
+4000000000	450
+5000000000	150
+
+# Now replace the view to work with the new table schema
+statement ok
+CREATE OR REPLACE VIEW evolving_view AS SELECT id, value FROM evolving_table WHERE value > 200;
+
+# Verify the view now returns data from the new table with the new types
+query II
+SELECT * FROM evolving_view ORDER BY id;
+----
+3000000000	300
+4000000000	450
+
+# Replace the view again to select all rows
+statement ok
+CREATE OR REPLACE VIEW evolving_view AS SELECT id, value FROM evolving_table;
+
+query II
+SELECT * FROM evolving_view ORDER BY id;
+----
+3000000000	300
+4000000000	450
+5000000000	150
+
+# Cleanup Test 12
+statement ok
+drop view evolving_view;
+
+statement ok
+drop table evolving_table;
+
+# Test 13: Replace persisted view after reattaching the catalog
+statement ok
+DROP VIEW IF EXISTS my_datalake.replace_view_schema.reattach_view;
+
+statement ok
+CREATE VIEW reattach_view AS SELECT 1 as val;
+
+query I
+SELECT * FROM reattach_view;
+----
+1
+
+restart
+
+statement ok
+use my_datalake.replace_view_schema;
+
+statement ok
+CREATE OR REPLACE VIEW reattach_view AS SELECT 2 as val;
+
+query I
+SELECT * FROM reattach_view;
+----
+2
+
+statement ok
+drop view reattach_view;
+
+# Cleanup
+statement ok
+drop view cycle_view;
+
+statement ok
+drop view column_order_view;
+
+statement ok
+drop view join_view;
+
+statement ok
+drop view type_test;
+
+statement ok
+drop view base_view;
+
+statement ok
+drop view cache_test;
+
+statement ok
+drop view agg_view;
+
+statement ok
+drop view schema_test;
+
+statement ok
+drop view counter;
+
+statement ok
+drop view my_view;
+
+statement ok
+drop view new_view;
+
+statement ok
+drop table base2;
+
+statement ok
+drop table base;

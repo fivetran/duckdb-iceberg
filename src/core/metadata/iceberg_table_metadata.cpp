@@ -490,6 +490,11 @@ string IcebergTableMetadata::GetTableProperty(string property_string) const {
 	return "";
 }
 
+bool IcebergTableMetadata::GetParallelWritesEnabled() const {
+	auto write_parallel_writes = GetTableProperty("write.parallel-writes");
+	return write_parallel_writes == "true" || write_parallel_writes == "1";
+}
+
 bool IcebergTableMetadata::PropertiesAllowPositionalDeletes(IcebergSnapshotOperationType operation_type) const {
 	// first check write.delete.mode. If not present go to write.update.mode
 	switch (operation_type) {
