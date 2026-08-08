@@ -159,6 +159,10 @@ const IcebergTableSchema &IcebergMultiFileList::GetSchema() const {
 	return shared_state->scan_info->schema;
 }
 
+const IcebergBoundScanMetadataV1 &IcebergMultiFileList::GetBoundScanMetadata() const {
+	return shared_state->scan_info->bound_scan;
+}
+
 bool IcebergMultiFileList::FinishedScanningDeletes() const {
 	return !shared_state->delete_manifest_reader || shared_state->delete_manifest_reader->Finished();
 }

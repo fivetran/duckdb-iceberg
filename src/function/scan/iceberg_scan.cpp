@@ -56,6 +56,62 @@ static unique_ptr<FunctionData> IcebergScanDeserialize(Deserializer &deserialize
 	throw NotImplementedException("IcebergScan deserialization not implemented");
 }
 
+static Value BoundScanInfoValue(const IcebergBoundScanMetadataV1 &metadata) {
+	constexpr const char *FIVETRAN_BM25_BLOB_TYPE = "fivetran-tantivy-bm25-v1";
+	child_list_t<LogicalType> property_types {{"key", LogicalType::VARCHAR}, {"value", LogicalType::VARCHAR}};
+	child_list_t<LogicalType> index_types {
+	    {"statistics_path", LogicalType::VARCHAR},
+	    {"file_size", LogicalType::BIGINT},
+	    {"blob_type", LogicalType::VARCHAR},
+	    {"blob_snapshot_id", LogicalType::BIGINT},
+	    {"blob_sequence_number", LogicalType::BIGINT},
+	    {"field_ids", LogicalType::LIST(LogicalType::INTEGER)},
+	    {"field_names", LogicalType::LIST(LogicalType::VARCHAR)},
+	    {"properties", LogicalType::LIST(LogicalType::STRUCT(property_types))},
+	};
+	vector<Value> indexes;
+	for (auto &statistics : metadata.statistics) {
+		for (auto &blob : statistics.blobs) {
+			if (blob.type != FIVETRAN_BM25_BLOB_TYPE) {
+				continue;
+			}
+			vector<Value> field_ids;
+			vector<Value> field_names;
+			for (auto field_id : blob.fields) {
+				field_ids.push_back(Value::INTEGER(field_id));
+				for (auto &field : metadata.fields) {
+					if (field.field_id == field_id) {
+						field_names.push_back(field.name);
+						break;
+					}
+				}
+			}
+			vector<Value> properties;
+			for (auto &property : blob.properties) {
+				properties.push_back(Value::STRUCT({{"key", property.first}, {"value", property.second}}));
+			}
+			indexes.push_back(Value::STRUCT({
+			    {"statistics_path", statistics.path},
+			    {"file_size", Value::BIGINT(statistics.file_size)},
+			    {"blob_type", blob.type},
+			    {"blob_snapshot_id", Value::BIGINT(blob.snapshot_id)},
+			    {"blob_sequence_number", Value::BIGINT(blob.sequence_number)},
+			    {"field_ids", Value::LIST(LogicalType::INTEGER, std::move(field_ids))},
+			    {"field_names", Value::LIST(LogicalType::VARCHAR, std::move(field_names))},
+			    {"properties", Value::LIST(LogicalType::STRUCT(property_types), std::move(properties))},
+			}));
+		}
+	}
+	return Value::STRUCT({
+	    {"contract_version", Value::UINTEGER(FIVETRAN_BOUND_SCAN_VERSION)},
+	    {"has_snapshot", Value::BOOLEAN(metadata.has_snapshot)},
+	    {"snapshot_id", Value::BIGINT(metadata.snapshot_id)},
+	    {"sequence_number", Value::BIGINT(metadata.sequence_number)},
+	    {"schema_id", Value::INTEGER(metadata.schema_id)},
+	    {"indexes", Value::LIST(LogicalType::STRUCT(index_types), std::move(indexes))},
+	});
+}
+
 BindInfo IcebergBindInfo(const optional_ptr<FunctionData> bind_data) {
 	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
 	auto &file_list = multi_file_data.file_list->Cast<IcebergMultiFileList>();
@@ -63,7 +119,9 @@ BindInfo IcebergBindInfo(const optional_ptr<FunctionData> bind_data) {
 	if (!table) {
 		return BindInfo(ScanType::EXTERNAL);
 	}
-	return BindInfo(*table);
+	BindInfo result(*table);
+	result.InsertOption(FIVETRAN_BOUND_SCAN_OPTION_V1, BoundScanInfoValue(file_list.GetBoundScanMetadata()));
+	return result;
 }
 
 //! FIXME: needs v1.5.1, causes a crash on v1.5.0

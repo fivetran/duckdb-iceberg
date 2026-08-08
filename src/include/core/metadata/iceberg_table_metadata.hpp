@@ -12,6 +12,7 @@
 #include "iceberg_options.hpp"
 #include "rest_catalog/objects/list.hpp"
 #include "planning/snapshot/iceberg_snapshot_scan_info.hpp"
+#include "fivetran/iceberg_bound_scan_metadata.hpp"
 
 namespace duckdb {
 
@@ -146,6 +147,8 @@ public:
 	case_insensitive_map_t<string> table_properties;
 
 	vector<IcebergMetadataLogItem> metadata_log;
+	//! Snapshot statistics and Puffin blob descriptors retained for bound-scan consumers.
+	vector<IcebergBoundStatisticsFileV1> statistics;
 
 public:
 	IcebergTableMetadata() = default;
