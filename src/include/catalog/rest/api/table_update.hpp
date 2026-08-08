@@ -158,4 +158,17 @@ struct SetLocation : public IcebergTableUpdate {
 	void CreateUpdate(DatabaseInstance &db, ClientContext &context, IcebergCommitState &commit_state) const override;
 };
 
+struct SetFivetranAIStatistics : public IcebergTableUpdate {
+	static constexpr const IcebergTableUpdateType TYPE = IcebergTableUpdateType::SET_STATISTICS;
+
+	SetFivetranAIStatistics(const IcebergTableInformation &table_info, string statistics_path, string index_name,
+	                       int64_t snapshot_id, int64_t sequence_number);
+	void CreateUpdate(DatabaseInstance &db, ClientContext &context, IcebergCommitState &commit_state) const override;
+
+	string statistics_path;
+	string index_name;
+	int64_t snapshot_id;
+	int64_t sequence_number;
+};
+
 } // namespace duckdb

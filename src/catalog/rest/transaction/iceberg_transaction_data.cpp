@@ -24,6 +24,12 @@ IcebergTransactionData::IcebergTransactionData(ClientContext &context, const Ice
 	initial_schema_id = table_info.table_metadata.GetCurrentSchemaId();
 }
 
+void IcebergTransactionData::TableSetFivetranAIStatistics(const string &statistics_path, const string &index_name,
+	                                                      int64_t snapshot_id, int64_t sequence_number) {
+	updates.push_back(
+	    make_uniq<SetFivetranAIStatistics>(table_info, statistics_path, index_name, snapshot_id, sequence_number));
+}
+
 void IcebergTransactionData::CacheExistingManifestList(lock_guard<mutex> &guard, const IcebergTableMetadata &metadata) {
 	if (!alters.empty()) {
 		return;

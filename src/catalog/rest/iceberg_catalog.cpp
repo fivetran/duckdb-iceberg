@@ -7,6 +7,15 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/types/uuid.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/parsed_data/copy_info.hpp"
+#include "duckdb/parser/parsed_data/create_index_info.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/tableref/basetableref.hpp"
 #include "regex"
 
 #include "catalog/rest/catalog_entry/schema/iceberg_schema_entry.hpp"
@@ -131,7 +140,101 @@ void IcebergCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 unique_ptr<LogicalOperator> IcebergCatalog::BindCreateIndex(Binder &binder, CreateStatement &stmt,
                                                             TableCatalogEntry &table,
                                                             unique_ptr<LogicalOperator> plan) {
-	throw NotImplementedException("IcebergCatalog BindCreateIndex");
+	auto &info = stmt.info->Cast<CreateIndexInfo>();
+	if (!StringUtil::CIEquals(info.index_type, "FIVETRAN_AI")) {
+		throw NotImplementedException("Iceberg CREATE INDEX only supports USING FIVETRAN_AI");
+	}
+	if (info.constraint_type != IndexConstraintType::NONE) {
+		throw BinderException("FIVETRAN_AI indexes do not enforce uniqueness");
+	}
+	if (info.expressions.size() != 2 || info.expressions[0]->GetExpressionClass() != ExpressionClass::COLUMN_REF ||
+	    info.expressions[1]->GetExpressionClass() != ExpressionClass::COLUMN_REF) {
+		throw BinderException("FIVETRAN_AI BM25 indexes require exactly two columns: (id, content)");
+	}
+	for (auto &option : info.options) {
+		if (!StringUtil::CIEquals(option.first, "mode")) {
+			throw BinderException("unknown FIVETRAN_AI index option: %s", option.first);
+		}
+	}
+	auto mode = info.options.find("mode");
+	if (mode == info.options.end() || mode->second.IsNull() ||
+	    !StringUtil::CIEquals(mode->second.ToString(), "bm25")) {
+		throw BinderException("FIVETRAN_AI indexes require WITH (mode = 'bm25')");
+	}
+
+	auto &table_info = table.Cast<IcebergTableEntry>().table_info;
+	auto snapshot = table_info.table_metadata.GetLatestSnapshot();
+	if (!snapshot) {
+		throw BinderException("cannot create a BM25 index on an Iceberg table with no snapshot");
+	}
+	for (auto &statistics_file : table_info.table_metadata.statistics) {
+		if (statistics_file.snapshot_id != snapshot->snapshot_id) {
+			continue;
+		}
+		for (auto &blob : statistics_file.blobs) {
+			auto existing_name = blob.properties.find("index-name");
+			if (blob.type == "fivetran-tantivy-bm25-v1" && existing_name != blob.properties.end() &&
+			    existing_name->second == info.index_name) {
+				throw CatalogException("BM25 index with name \"%s\" already exists on the current Iceberg snapshot",
+				                       info.index_name);
+			}
+		}
+	}
+
+	auto id_name = info.expressions[0]->Cast<ColumnRefExpression>().GetColumnName();
+	auto content_name = info.expressions[1]->Cast<ColumnRefExpression>().GetColumnName();
+	auto &schemas = table_info.table_metadata.GetSchemas();
+	auto schema_entry = schemas.find(table_info.table_metadata.GetCurrentSchemaId());
+	if (schema_entry == schemas.end()) {
+		throw InternalException("Iceberg table has no current schema");
+	}
+	vector<string> id_path;
+	id_path.push_back(id_name);
+	vector<string> content_path;
+	content_path.push_back(content_name);
+	auto id_column = schema_entry->second->GetFromPath(id_path, nullptr);
+	auto content_column = schema_entry->second->GetFromPath(content_path, nullptr);
+	if (!id_column || !content_column) {
+		throw BinderException("FIVETRAN_AI index columns must exist in the current Iceberg schema");
+	}
+	if (id_column->type.id() != LogicalTypeId::VARCHAR || content_column->type.id() != LogicalTypeId::VARCHAR) {
+		throw BinderException("FIVETRAN_AI BM25 index columns must both be VARCHAR");
+	}
+
+	auto &file_system = FileSystem::GetFileSystem(binder.context);
+	auto file_name = std::to_string(snapshot->snapshot_id) + "-" + UUID::ToString(UUID::GenerateRandomUUID()) +
+	                 ".bm25.puffin";
+	auto statistics_path = file_system.JoinPath(file_system.JoinPath(table_info.BaseFilePath(), "metadata"), file_name);
+	auto &transaction = IcebergTransaction::Get(binder.context, *this);
+	ApplyTableUpdate(table_info, transaction, [&](IcebergTableInformation &updated_table) {
+		updated_table.GetOrCreateTransactionData(transaction).TableSetFivetranAIStatistics(
+		    statistics_path, info.index_name, snapshot->snapshot_id, snapshot->sequence_number);
+	});
+
+	auto copy_statement = make_uniq<CopyStatement>();
+	copy_statement->info = make_uniq<CopyInfo>();
+	auto &copy = *copy_statement->info;
+	copy.is_from = false;
+	copy.is_format_auto_detected = false;
+	copy.format = "fivetran_ai_puffin";
+	copy.file_path = statistics_path;
+	copy.options["index_name"].push_back(Value(info.index_name));
+	copy.options["snapshot_id"].push_back(Value::BIGINT(snapshot->snapshot_id));
+	copy.options["sequence_number"].push_back(Value::BIGINT(snapshot->sequence_number));
+	copy.options["stable_id_field_id"].push_back(Value::INTEGER(id_column->id));
+	copy.options["content_field_id"].push_back(Value::INTEGER(content_column->id));
+
+	auto select = make_uniq<SelectNode>();
+	select->select_list.push_back(make_uniq<ColumnRefExpression>(id_name, info.table));
+	select->select_list.push_back(make_uniq<ColumnRefExpression>(content_name, info.table));
+	auto source = make_uniq<BaseTableRef>();
+	source->catalog_name = info.catalog;
+	source->schema_name = info.schema;
+	source->table_name = info.table;
+	select->from_table = std::move(source);
+	copy.select_statement = std::move(select);
+	auto copy_binder = Binder::CreateBinder(binder.context);
+	return copy_binder->Bind(*copy_statement).plan;
 }
 
 bool IcebergCatalog::InMemory() {

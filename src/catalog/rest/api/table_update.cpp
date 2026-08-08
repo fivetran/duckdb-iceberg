@@ -1,6 +1,8 @@
 #include "catalog/rest/api/table_update.hpp"
 #include "duckdb/common/exception.hpp"
 #include "catalog/rest/iceberg_table_set.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "core/metadata/puffin_file.hpp"
 
 namespace duckdb {
 
@@ -19,6 +21,60 @@ static rest_api_objects::Schema CopySchema(const IcebergTableSchema &schema) {
 	    yyjson_read(schema_str.c_str(), strlen(schema_str.c_str()), 0));
 	yyjson_val *val = yyjson_doc_get_root(new_doc.get());
 	return rest_api_objects::Schema::FromJSON(val);
+}
+
+SetFivetranAIStatistics::SetFivetranAIStatistics(const IcebergTableInformation &table_info, string statistics_path_p,
+	                                             string index_name_p, int64_t snapshot_id_p,
+	                                             int64_t sequence_number_p)
+	: IcebergTableUpdate(TYPE, table_info), statistics_path(std::move(statistics_path_p)),
+	  index_name(std::move(index_name_p)), snapshot_id(snapshot_id_p), sequence_number(sequence_number_p) {
+}
+
+void SetFivetranAIStatistics::CreateUpdate(DatabaseInstance &, ClientContext &context,
+	                                       IcebergCommitState &commit_state) const {
+	auto &file_system = FileSystem::GetFileSystem(context);
+	auto file = file_system.OpenFile(statistics_path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
+	auto puffin = PuffinFile::Read(*file, "BM25 statistics file '" + statistics_path + "'");
+	if (puffin.blobs.size() != 1) {
+		throw IOException("BM25 Puffin file '%s' must contain exactly one blob", statistics_path);
+	}
+	auto &blob = puffin.blobs[0];
+	auto index_property = blob.properties.find("index-name");
+	if (blob.type != "fivetran-tantivy-bm25-v1" || blob.snapshot_id != snapshot_id ||
+	    blob.sequence_number != sequence_number || index_property == blob.properties.end() ||
+	    index_property->second != index_name) {
+		throw IOException("BM25 Puffin file '%s' does not match the index publication", statistics_path);
+	}
+	rest_api_objects::BlobMetadata blob_metadata;
+	blob_metadata.type = blob.type;
+	blob_metadata.snapshot_id = blob.snapshot_id;
+	blob_metadata.sequence_number = blob.sequence_number;
+	blob_metadata.fields = blob.fields;
+	blob_metadata.properties = blob.properties;
+	blob_metadata.has_properties = !blob.properties.empty();
+
+	commit_state.table_change.updates.emplace_back();
+	auto &table_update = commit_state.table_change.updates.back();
+	table_update.has_set_statistics_update = true;
+	auto &set_statistics = table_update.set_statistics_update;
+	set_statistics.has_action = true;
+	set_statistics.action = "set-statistics";
+	set_statistics.has_snapshot_id = true;
+	set_statistics.snapshot_id = snapshot_id;
+	auto &statistics = set_statistics.statistics;
+	statistics.snapshot_id = snapshot_id;
+	statistics.statistics_path = statistics_path;
+	statistics.file_size_in_bytes = NumericCast<int64_t>(puffin.file_size);
+	statistics.file_footer_size_in_bytes = NumericCast<int64_t>(puffin.footer_size);
+	statistics.blob_metadata.push_back(std::move(blob_metadata));
+
+	commit_state.table_change.requirements.emplace_back();
+	auto &requirement = commit_state.table_change.requirements.back();
+	requirement.has_assert_ref_snapshot_id = true;
+	requirement.assert_ref_snapshot_id.type.value = "assert-ref-snapshot-id";
+	requirement.assert_ref_snapshot_id.ref = "main";
+	requirement.assert_ref_snapshot_id.has_snapshot_id = true;
+	requirement.assert_ref_snapshot_id.snapshot_id = snapshot_id;
 }
 
 AddSchemaUpdate::AddSchemaUpdate(const IcebergTableInformation &table_info, int32_t schema_id)

@@ -56,6 +56,7 @@ set(EXTENSION_SOURCES
 	src/core/expression/iceberg_transform.cpp
 	src/core/expression/iceberg_value.cpp
 	src/core/metadata/iceberg_table_metadata.cpp
+	src/core/metadata/puffin_file.cpp
 	src/core/metadata/manifest/iceberg_manifest_list.cpp
 	src/core/metadata/manifest/iceberg_manifest.cpp
 	src/core/metadata/partition/iceberg_partition_spec.cpp

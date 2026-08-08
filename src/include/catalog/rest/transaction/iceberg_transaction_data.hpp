@@ -46,6 +46,8 @@ public:
 	void TableSetProperties(const case_insensitive_map_t<string> &properties);
 	void TableRemoveProperties(const vector<string> &properties);
 	void TableSetLocation();
+	void TableSetFivetranAIStatistics(const string &statistics_path, const string &index_name, int64_t snapshot_id,
+	                                  int64_t sequence_number);
 
 private:
 	void CacheExistingManifestList(lock_guard<mutex> &guard, const IcebergTableMetadata &metadata);
