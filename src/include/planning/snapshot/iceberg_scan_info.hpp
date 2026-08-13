@@ -10,6 +10,7 @@
 #include "catalog/rest/transaction/iceberg_transaction_data.hpp"
 #include "planning/snapshot/iceberg_snapshot_scan_info.hpp"
 #include "fivetran/iceberg_bound_scan_metadata.hpp"
+#include "fivetran/fivetran_ai_index_definition.hpp"
 
 namespace duckdb {
 
@@ -55,18 +56,31 @@ inline IcebergBoundScanMetadataV1 GetBoundScanMetadata(const IcebergTableMetadat
 	return result;
 }
 
+inline IcebergBoundScanMetadataV2 GetBoundScanMetadataV2(const IcebergTableMetadata &metadata,
+                                                         const IcebergSnapshotScanInfo &snapshot_info,
+                                                         const IcebergTableSchema &schema) {
+	IcebergBoundScanMetadataV2 result;
+	static_cast<IcebergBoundScanMetadataV1 &>(result) = GetBoundScanMetadata(metadata, snapshot_info, schema);
+	for (auto &definition : GetFivetranAIBM25IndexDefinitions(metadata.table_properties, schema)) {
+		result.definitions.push_back({definition.name, definition.stable_id_field_id, definition.content_field_id});
+	}
+	return result;
+}
+
 struct IcebergScanInfo : public TableFunctionInfo {
 public:
 	IcebergScanInfo(const string &metadata_path, const IcebergTableMetadata &metadata,
 	                IcebergSnapshotScanInfo snapshot_info, const IcebergTableSchema &schema)
 	    : metadata_path(metadata_path), metadata(metadata), snapshot_info(snapshot_info), schema(schema) {
 		bound_scan = GetBoundScanMetadata(metadata, this->snapshot_info, schema);
+		bound_scan_v2 = GetBoundScanMetadataV2(metadata, this->snapshot_info, schema);
 	}
 	IcebergScanInfo(const string &metadata_path, unique_ptr<IcebergScanTemporaryData> owned_temp_data_p,
 	                IcebergSnapshotScanInfo snapshot_info, const IcebergTableSchema &schema)
 	    : metadata_path(metadata_path), owned_temp_data(std::move(owned_temp_data_p)),
 	      metadata(owned_temp_data->metadata), snapshot_info(snapshot_info), schema(schema) {
 		bound_scan = GetBoundScanMetadata(metadata, this->snapshot_info, schema);
+		bound_scan_v2 = GetBoundScanMetadataV2(metadata, this->snapshot_info, schema);
 	}
 
 public:
@@ -78,6 +92,7 @@ public:
 	IcebergSnapshotScanInfo snapshot_info;
 	const IcebergTableSchema &schema;
 	IcebergBoundScanMetadataV1 bound_scan;
+	IcebergBoundScanMetadataV2 bound_scan_v2;
 };
 
 } // namespace duckdb

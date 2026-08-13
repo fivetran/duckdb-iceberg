@@ -110,6 +110,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 		loader.RegisterFunction(fun);
 	}
 
+	Connection connection(loader.GetDatabaseInstance());
+	auto macro_result = connection.Query("CREATE SCHEMA IF NOT EXISTS ai; "
+	                                     "CREATE MACRO IF NOT EXISTS ai.refresh_indexes(table_name) AS TABLE "
+	                                     "SELECT * FROM fivetran_ai_refresh_indexes(table_name);");
+	if (macro_result->HasError()) {
+		throw InvalidInputException("failed to install ai.refresh_indexes: %s", macro_result->GetError());
+	}
+
 	// Iceberg COPY Function
 	loader.RegisterFunction(IcebergCopyFunction::Create());
 

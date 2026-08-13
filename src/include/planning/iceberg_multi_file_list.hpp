@@ -117,6 +117,7 @@ public:
 	const IcebergSnapshotScanInfo &GetSnapshot() const;
 	const IcebergTableSchema &GetSchema() const;
 	const IcebergBoundScanMetadataV1 &GetBoundScanMetadata() const;
+	const IcebergBoundScanMetadataV2 &GetBoundScanMetadataV2() const;
 	IcebergTableEntry *GetTable() const;
 	void SetTable(IcebergTableEntry *table);
 	void SetOptions(const IcebergOptions &options);

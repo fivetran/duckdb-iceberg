@@ -30,6 +30,8 @@
 #include "catalog/rest/storage/authorization/oauth2.hpp"
 #include "catalog/rest/storage/authorization/sigv4.hpp"
 #include "catalog/rest/storage/authorization/none.hpp"
+#include "fivetran/fivetran_ai_index_definition.hpp"
+#include "fivetran/fivetran_ai_refresh.hpp"
 #include "rest_catalog/objects/catalog_config.hpp"
 
 using namespace duckdb_yyjson;
@@ -157,30 +159,11 @@ unique_ptr<LogicalOperator> IcebergCatalog::BindCreateIndex(Binder &binder, Crea
 		}
 	}
 	auto mode = info.options.find("mode");
-	if (mode == info.options.end() || mode->second.IsNull() ||
-	    !StringUtil::CIEquals(mode->second.ToString(), "bm25")) {
+	if (mode == info.options.end() || mode->second.IsNull() || !StringUtil::CIEquals(mode->second.ToString(), "bm25")) {
 		throw BinderException("FIVETRAN_AI indexes require WITH (mode = 'bm25')");
 	}
 
 	auto &table_info = table.Cast<IcebergTableEntry>().table_info;
-	auto snapshot = table_info.table_metadata.GetLatestSnapshot();
-	if (!snapshot) {
-		throw BinderException("cannot create a BM25 index on an Iceberg table with no snapshot");
-	}
-	for (auto &statistics_file : table_info.table_metadata.statistics) {
-		if (statistics_file.snapshot_id != snapshot->snapshot_id) {
-			continue;
-		}
-		for (auto &blob : statistics_file.blobs) {
-			auto existing_name = blob.properties.find("index-name");
-			if (blob.type == "fivetran-tantivy-bm25-v1" && existing_name != blob.properties.end() &&
-			    existing_name->second == info.index_name) {
-				throw CatalogException("BM25 index with name \"%s\" already exists on the current Iceberg snapshot",
-				                       info.index_name);
-			}
-		}
-	}
-
 	auto id_name = info.expressions[0]->Cast<ColumnRefExpression>().GetColumnName();
 	auto content_name = info.expressions[1]->Cast<ColumnRefExpression>().GetColumnName();
 	auto &schemas = table_info.table_metadata.GetSchemas();
@@ -201,40 +184,15 @@ unique_ptr<LogicalOperator> IcebergCatalog::BindCreateIndex(Binder &binder, Crea
 		throw BinderException("FIVETRAN_AI BM25 index columns must both be VARCHAR");
 	}
 
-	auto &file_system = FileSystem::GetFileSystem(binder.context);
-	auto file_name = std::to_string(snapshot->snapshot_id) + "-" + UUID::ToString(UUID::GenerateRandomUUID()) +
-	                 ".bm25.puffin";
-	auto statistics_path = file_system.JoinPath(file_system.JoinPath(table_info.BaseFilePath(), "metadata"), file_name);
-	auto &transaction = IcebergTransaction::Get(binder.context, *this);
-	ApplyTableUpdate(table_info, transaction, [&](IcebergTableInformation &updated_table) {
-		updated_table.GetOrCreateTransactionData(transaction).TableSetFivetranAIStatistics(
-		    statistics_path, info.index_name, snapshot->snapshot_id, snapshot->sequence_number);
-	});
-
-	auto copy_statement = make_uniq<CopyStatement>();
-	copy_statement->info = make_uniq<CopyInfo>();
-	auto &copy = *copy_statement->info;
-	copy.is_from = false;
-	copy.is_format_auto_detected = false;
-	copy.format = "fivetran_ai_puffin";
-	copy.file_path = statistics_path;
-	copy.options["index_name"].push_back(Value(info.index_name));
-	copy.options["snapshot_id"].push_back(Value::BIGINT(snapshot->snapshot_id));
-	copy.options["sequence_number"].push_back(Value::BIGINT(snapshot->sequence_number));
-	copy.options["stable_id_field_id"].push_back(Value::INTEGER(id_column->id));
-	copy.options["content_field_id"].push_back(Value::INTEGER(content_column->id));
-
-	auto select = make_uniq<SelectNode>();
-	select->select_list.push_back(make_uniq<ColumnRefExpression>(id_name, info.table));
-	select->select_list.push_back(make_uniq<ColumnRefExpression>(content_name, info.table));
-	auto source = make_uniq<BaseTableRef>();
-	source->catalog_name = info.catalog;
-	source->schema_name = info.schema;
-	source->table_name = info.table;
-	select->from_table = std::move(source);
-	copy.select_statement = std::move(select);
-	auto copy_binder = Binder::CreateBinder(binder.context);
-	return copy_binder->Bind(*copy_statement).plan;
+	auto definitions =
+	    GetFivetranAIBM25IndexDefinitions(table_info.table_metadata.table_properties, *schema_entry->second);
+	for (auto &definition : definitions) {
+		if (StringUtil::CIEquals(definition.name, info.index_name)) {
+			throw CatalogException("BM25 index with name \"%s\" already exists", info.index_name);
+		}
+	}
+	definitions.push_back({info.index_name, id_column->id, content_column->id, id_name, content_name});
+	return BindFivetranAIBM25Refresh(binder, table.Cast<IcebergTableEntry>(), std::move(definitions), true);
 }
 
 bool IcebergCatalog::InMemory() {

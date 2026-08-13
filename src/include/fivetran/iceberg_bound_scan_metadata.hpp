@@ -10,6 +10,8 @@ namespace duckdb {
 //! The Value is a struct containing snapshot identity and a list of matching index descriptors.
 constexpr const char *FIVETRAN_BOUND_SCAN_OPTION_V1 = "fivetran.iceberg.bound_scan.v1";
 constexpr uint32_t FIVETRAN_BOUND_SCAN_VERSION = 1;
+constexpr const char *FIVETRAN_BOUND_SCAN_OPTION_V2 = "fivetran.iceberg.bound_scan.v2";
+constexpr uint32_t FIVETRAN_BOUND_SCAN_VERSION_V2 = 2;
 
 struct IcebergBoundFieldV1 {
 	int32_t field_id;
@@ -39,6 +41,16 @@ struct IcebergBoundScanMetadataV1 {
 	int32_t schema_id = 0;
 	vector<IcebergBoundFieldV1> fields;
 	vector<IcebergBoundStatisticsFileV1> statistics;
+};
+
+struct IcebergBoundIndexDefinitionV2 {
+	string name;
+	int32_t stable_id_field_id;
+	int32_t content_field_id;
+};
+
+struct IcebergBoundScanMetadataV2 : public IcebergBoundScanMetadataV1 {
+	vector<IcebergBoundIndexDefinitionV2> definitions;
 };
 
 } // namespace duckdb

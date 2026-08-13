@@ -163,6 +163,10 @@ const IcebergBoundScanMetadataV1 &IcebergMultiFileList::GetBoundScanMetadata() c
 	return shared_state->scan_info->bound_scan;
 }
 
+const IcebergBoundScanMetadataV2 &IcebergMultiFileList::GetBoundScanMetadataV2() const {
+	return shared_state->scan_info->bound_scan_v2;
+}
+
 bool IcebergMultiFileList::FinishedScanningDeletes() const {
 	return !shared_state->delete_manifest_reader || shared_state->delete_manifest_reader->Finished();
 }

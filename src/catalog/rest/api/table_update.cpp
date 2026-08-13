@@ -24,34 +24,41 @@ static rest_api_objects::Schema CopySchema(const IcebergTableSchema &schema) {
 }
 
 SetFivetranAIStatistics::SetFivetranAIStatistics(const IcebergTableInformation &table_info, string statistics_path_p,
-	                                             string index_name_p, int64_t snapshot_id_p,
-	                                             int64_t sequence_number_p)
-	: IcebergTableUpdate(TYPE, table_info), statistics_path(std::move(statistics_path_p)),
-	  index_name(std::move(index_name_p)), snapshot_id(snapshot_id_p), sequence_number(sequence_number_p) {
+                                                 vector<string> index_names_p, int64_t snapshot_id_p,
+                                                 int64_t sequence_number_p)
+    : IcebergTableUpdate(TYPE, table_info), statistics_path(std::move(statistics_path_p)),
+      index_names(std::move(index_names_p)), snapshot_id(snapshot_id_p), sequence_number(sequence_number_p) {
 }
 
 void SetFivetranAIStatistics::CreateUpdate(DatabaseInstance &, ClientContext &context,
-	                                       IcebergCommitState &commit_state) const {
+                                           IcebergCommitState &commit_state) const {
 	auto &file_system = FileSystem::GetFileSystem(context);
 	auto file = file_system.OpenFile(statistics_path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
 	auto puffin = PuffinFile::Read(*file, "BM25 statistics file '" + statistics_path + "'");
-	if (puffin.blobs.size() != 1) {
-		throw IOException("BM25 Puffin file '%s' must contain exactly one blob", statistics_path);
+	if (puffin.blobs.size() != index_names.size()) {
+		throw IOException("BM25 Puffin file '%s' does not contain every declared index", statistics_path);
 	}
-	auto &blob = puffin.blobs[0];
-	auto index_property = blob.properties.find("index-name");
-	if (blob.type != "fivetran-tantivy-bm25-v1" || blob.snapshot_id != snapshot_id ||
-	    blob.sequence_number != sequence_number || index_property == blob.properties.end() ||
-	    index_property->second != index_name) {
-		throw IOException("BM25 Puffin file '%s' does not match the index publication", statistics_path);
+	case_insensitive_set_t expected_names(index_names.begin(), index_names.end());
+	vector<rest_api_objects::BlobMetadata> blob_metadata;
+	for (auto &blob : puffin.blobs) {
+		auto index_property = blob.properties.find("index-name");
+		if (blob.type != "fivetran-tantivy-bm25-v1" || blob.snapshot_id != snapshot_id ||
+		    blob.sequence_number != sequence_number || index_property == blob.properties.end() ||
+		    expected_names.erase(index_property->second) != 1) {
+			throw IOException("BM25 Puffin file '%s' does not match the index publication", statistics_path);
+		}
+		blob_metadata.emplace_back();
+		auto &result = blob_metadata.back();
+		result.type = blob.type;
+		result.snapshot_id = blob.snapshot_id;
+		result.sequence_number = blob.sequence_number;
+		result.fields = blob.fields;
+		result.properties = blob.properties;
+		result.has_properties = !blob.properties.empty();
 	}
-	rest_api_objects::BlobMetadata blob_metadata;
-	blob_metadata.type = blob.type;
-	blob_metadata.snapshot_id = blob.snapshot_id;
-	blob_metadata.sequence_number = blob.sequence_number;
-	blob_metadata.fields = blob.fields;
-	blob_metadata.properties = blob.properties;
-	blob_metadata.has_properties = !blob.properties.empty();
+	if (!expected_names.empty()) {
+		throw IOException("BM25 Puffin file '%s' does not contain every declared index", statistics_path);
+	}
 
 	commit_state.table_change.updates.emplace_back();
 	auto &table_update = commit_state.table_change.updates.back();
@@ -66,7 +73,7 @@ void SetFivetranAIStatistics::CreateUpdate(DatabaseInstance &, ClientContext &co
 	statistics.statistics_path = statistics_path;
 	statistics.file_size_in_bytes = NumericCast<int64_t>(puffin.file_size);
 	statistics.file_footer_size_in_bytes = NumericCast<int64_t>(puffin.footer_size);
-	statistics.blob_metadata.push_back(std::move(blob_metadata));
+	statistics.blob_metadata = std::move(blob_metadata);
 
 	commit_state.table_change.requirements.emplace_back();
 	auto &requirement = commit_state.table_change.requirements.back();

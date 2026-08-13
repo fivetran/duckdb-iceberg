@@ -161,12 +161,12 @@ struct SetLocation : public IcebergTableUpdate {
 struct SetFivetranAIStatistics : public IcebergTableUpdate {
 	static constexpr const IcebergTableUpdateType TYPE = IcebergTableUpdateType::SET_STATISTICS;
 
-	SetFivetranAIStatistics(const IcebergTableInformation &table_info, string statistics_path, string index_name,
-	                       int64_t snapshot_id, int64_t sequence_number);
+	SetFivetranAIStatistics(const IcebergTableInformation &table_info, string statistics_path,
+	                        vector<string> index_names, int64_t snapshot_id, int64_t sequence_number);
 	void CreateUpdate(DatabaseInstance &db, ClientContext &context, IcebergCommitState &commit_state) const override;
 
 	string statistics_path;
-	string index_name;
+	vector<string> index_names;
 	int64_t snapshot_id;
 	int64_t sequence_number;
 };

@@ -112,6 +112,33 @@ static Value BoundScanInfoValue(const IcebergBoundScanMetadataV1 &metadata) {
 	});
 }
 
+static Value BoundScanInfoValueV2(const IcebergBoundScanMetadataV2 &metadata) {
+	child_list_t<LogicalType> definition_types {
+	    {"name", LogicalType::VARCHAR},
+	    {"stable_id_field_id", LogicalType::INTEGER},
+	    {"content_field_id", LogicalType::INTEGER},
+	};
+	vector<Value> definitions;
+	for (auto &definition : metadata.definitions) {
+		definitions.push_back(Value::STRUCT({
+		    {"name", definition.name},
+		    {"stable_id_field_id", Value::INTEGER(definition.stable_id_field_id)},
+		    {"content_field_id", Value::INTEGER(definition.content_field_id)},
+		}));
+	}
+	auto v1 = BoundScanInfoValue(metadata);
+	auto &fields = StructValue::GetChildren(v1);
+	return Value::STRUCT({
+	    {"contract_version", Value::UINTEGER(FIVETRAN_BOUND_SCAN_VERSION_V2)},
+	    {"has_snapshot", fields[1]},
+	    {"snapshot_id", fields[2]},
+	    {"sequence_number", fields[3]},
+	    {"schema_id", fields[4]},
+	    {"indexes", fields[5]},
+	    {"definitions", Value::LIST(LogicalType::STRUCT(definition_types), std::move(definitions))},
+	});
+}
+
 BindInfo IcebergBindInfo(const optional_ptr<FunctionData> bind_data) {
 	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
 	auto &file_list = multi_file_data.file_list->Cast<IcebergMultiFileList>();
@@ -121,6 +148,7 @@ BindInfo IcebergBindInfo(const optional_ptr<FunctionData> bind_data) {
 	}
 	BindInfo result(*table);
 	result.InsertOption(FIVETRAN_BOUND_SCAN_OPTION_V1, BoundScanInfoValue(file_list.GetBoundScanMetadata()));
+	result.InsertOption(FIVETRAN_BOUND_SCAN_OPTION_V2, BoundScanInfoValueV2(file_list.GetBoundScanMetadataV2()));
 	return result;
 }
 
