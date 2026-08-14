@@ -7,7 +7,7 @@
 namespace duckdb {
 
 //! Versioned payload returned in BindInfo::options by bound Iceberg table scans.
-//! The Value is a struct containing snapshot identity and a list of matching index descriptors.
+//! The Value contains snapshot identity and opaque descriptors for every Puffin blob on that snapshot.
 constexpr const char *FIVETRAN_BOUND_SCAN_OPTION_V1 = "fivetran.iceberg.bound_scan.v1";
 constexpr uint32_t FIVETRAN_BOUND_SCAN_VERSION = 1;
 constexpr const char *FIVETRAN_BOUND_SCAN_OPTION_V2 = "fivetran.iceberg.bound_scan.v2";

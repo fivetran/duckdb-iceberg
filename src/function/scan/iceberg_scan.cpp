@@ -57,9 +57,8 @@ static unique_ptr<FunctionData> IcebergScanDeserialize(Deserializer &deserialize
 }
 
 static Value BoundScanInfoValue(const IcebergBoundScanMetadataV1 &metadata) {
-	constexpr const char *FIVETRAN_BM25_BLOB_TYPE = "fivetran-tantivy-bm25-v1";
 	child_list_t<LogicalType> property_types {{"key", LogicalType::VARCHAR}, {"value", LogicalType::VARCHAR}};
-	child_list_t<LogicalType> index_types {
+	child_list_t<LogicalType> blob_types {
 	    {"statistics_path", LogicalType::VARCHAR},
 	    {"file_size", LogicalType::BIGINT},
 	    {"blob_type", LogicalType::VARCHAR},
@@ -69,12 +68,9 @@ static Value BoundScanInfoValue(const IcebergBoundScanMetadataV1 &metadata) {
 	    {"field_names", LogicalType::LIST(LogicalType::VARCHAR)},
 	    {"properties", LogicalType::LIST(LogicalType::STRUCT(property_types))},
 	};
-	vector<Value> indexes;
+	vector<Value> blobs;
 	for (auto &statistics : metadata.statistics) {
 		for (auto &blob : statistics.blobs) {
-			if (blob.type != FIVETRAN_BM25_BLOB_TYPE) {
-				continue;
-			}
 			vector<Value> field_ids;
 			vector<Value> field_names;
 			for (auto field_id : blob.fields) {
@@ -90,7 +86,7 @@ static Value BoundScanInfoValue(const IcebergBoundScanMetadataV1 &metadata) {
 			for (auto &property : blob.properties) {
 				properties.push_back(Value::STRUCT({{"key", property.first}, {"value", property.second}}));
 			}
-			indexes.push_back(Value::STRUCT({
+			blobs.push_back(Value::STRUCT({
 			    {"statistics_path", statistics.path},
 			    {"file_size", Value::BIGINT(statistics.file_size)},
 			    {"blob_type", blob.type},
@@ -108,7 +104,7 @@ static Value BoundScanInfoValue(const IcebergBoundScanMetadataV1 &metadata) {
 	    {"snapshot_id", Value::BIGINT(metadata.snapshot_id)},
 	    {"sequence_number", Value::BIGINT(metadata.sequence_number)},
 	    {"schema_id", Value::INTEGER(metadata.schema_id)},
-	    {"indexes", Value::LIST(LogicalType::STRUCT(index_types), std::move(indexes))},
+	    {"blobs", Value::LIST(LogicalType::STRUCT(blob_types), std::move(blobs))},
 	});
 }
 
@@ -134,7 +130,7 @@ static Value BoundScanInfoValueV2(const IcebergBoundScanMetadataV2 &metadata) {
 	    {"snapshot_id", fields[2]},
 	    {"sequence_number", fields[3]},
 	    {"schema_id", fields[4]},
-	    {"indexes", fields[5]},
+	    {"blobs", fields[5]},
 	    {"definitions", Value::LIST(LogicalType::STRUCT(definition_types), std::move(definitions))},
 	});
 }
