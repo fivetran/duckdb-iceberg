@@ -158,15 +158,21 @@ struct SetLocation : public IcebergTableUpdate {
 	void CreateUpdate(DatabaseInstance &db, ClientContext &context, IcebergCommitState &commit_state) const override;
 };
 
-struct SetFivetranAIStatistics : public IcebergTableUpdate {
+struct ExpectedPuffinBlob {
+	string type;
+	string property_key;
+	string property_value;
+};
+
+struct SetPuffinStatistics : public IcebergTableUpdate {
 	static constexpr const IcebergTableUpdateType TYPE = IcebergTableUpdateType::SET_STATISTICS;
 
-	SetFivetranAIStatistics(const IcebergTableInformation &table_info, string statistics_path,
-	                        vector<string> index_names, int64_t snapshot_id, int64_t sequence_number);
+	SetPuffinStatistics(const IcebergTableInformation &table_info, string statistics_path,
+	                    vector<ExpectedPuffinBlob> expected_blobs, int64_t snapshot_id, int64_t sequence_number);
 	void CreateUpdate(DatabaseInstance &db, ClientContext &context, IcebergCommitState &commit_state) const override;
 
 	string statistics_path;
-	vector<string> index_names;
+	vector<ExpectedPuffinBlob> expected_blobs;
 	int64_t snapshot_id;
 	int64_t sequence_number;
 };

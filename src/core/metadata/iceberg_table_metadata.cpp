@@ -453,13 +453,13 @@ IcebergTableMetadata IcebergTableMetadata::FromTableMetadata(const rest_api_obje
 		res.metadata_log.emplace_back(item.metadata_file, item.timestamp_ms);
 	}
 	for (auto &statistics_file : table_metadata.statistics) {
-		IcebergBoundStatisticsFileV1 statistics;
+		IcebergBoundStatisticsFile statistics;
 		statistics.snapshot_id = statistics_file.snapshot_id;
 		statistics.path = statistics_file.statistics_path;
 		statistics.file_size = statistics_file.file_size_in_bytes;
 		statistics.footer_size = statistics_file.file_footer_size_in_bytes;
 		for (auto &blob_metadata : statistics_file.blob_metadata) {
-			IcebergBoundBlobV1 blob;
+			IcebergBoundBlob blob;
 			blob.type = blob_metadata.type;
 			blob.snapshot_id = blob_metadata.snapshot_id;
 			blob.sequence_number = blob_metadata.sequence_number;

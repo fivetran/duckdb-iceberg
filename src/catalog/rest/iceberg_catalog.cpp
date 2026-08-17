@@ -7,15 +7,12 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
-#include "duckdb/common/file_system.hpp"
-#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
-#include "duckdb/parser/parsed_data/copy_info.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
-#include "duckdb/parser/query_node/select_node.hpp"
-#include "duckdb/parser/statement/copy_statement.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
-#include "duckdb/parser/tableref/basetableref.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "regex"
 
 #include "catalog/rest/catalog_entry/schema/iceberg_schema_entry.hpp"
@@ -30,8 +27,6 @@
 #include "catalog/rest/storage/authorization/oauth2.hpp"
 #include "catalog/rest/storage/authorization/sigv4.hpp"
 #include "catalog/rest/storage/authorization/none.hpp"
-#include "fivetran/fivetran_ai_index_definition.hpp"
-#include "fivetran/fivetran_ai_refresh.hpp"
 #include "rest_catalog/objects/catalog_config.hpp"
 
 using namespace duckdb_yyjson;
@@ -143,56 +138,46 @@ unique_ptr<LogicalOperator> IcebergCatalog::BindCreateIndex(Binder &binder, Crea
                                                             TableCatalogEntry &table,
                                                             unique_ptr<LogicalOperator> plan) {
 	auto &info = stmt.info->Cast<CreateIndexInfo>();
-	if (!StringUtil::CIEquals(info.index_type, "FIVETRAN_AI")) {
-		throw NotImplementedException("Iceberg CREATE INDEX only supports USING FIVETRAN_AI");
+	vector<Value> expression_kinds;
+	vector<Value> expression_values;
+	for (auto &expression : info.expressions) {
+		if (expression->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+			expression_kinds.push_back("column");
+			expression_values.push_back(expression->Cast<ColumnRefExpression>().GetColumnName());
+		} else {
+			expression_kinds.push_back("expression");
+			expression_values.push_back(expression->ToString());
+		}
 	}
-	if (info.constraint_type != IndexConstraintType::NONE) {
-		throw BinderException("FIVETRAN_AI indexes do not enforce uniqueness");
-	}
-	if (info.expressions.size() != 2 || info.expressions[0]->GetExpressionClass() != ExpressionClass::COLUMN_REF ||
-	    info.expressions[1]->GetExpressionClass() != ExpressionClass::COLUMN_REF) {
-		throw BinderException("FIVETRAN_AI BM25 indexes require exactly two columns: (id, content)");
-	}
+	vector<Value> option_keys;
+	vector<Value> option_values;
+	vector<Value> option_nulls;
 	for (auto &option : info.options) {
-		if (!StringUtil::CIEquals(option.first, "mode")) {
-			throw BinderException("unknown FIVETRAN_AI index option: %s", option.first);
-		}
+		option_keys.push_back(option.first);
+		option_values.push_back(option.second.IsNull() ? Value("") : Value(option.second.ToString()));
+		option_nulls.push_back(Value::BOOLEAN(option.second.IsNull()));
 	}
-	auto mode = info.options.find("mode");
-	if (mode == info.options.end() || mode->second.IsNull() || !StringUtil::CIEquals(mode->second.ToString(), "bm25")) {
-		throw BinderException("FIVETRAN_AI indexes require WITH (mode = 'bm25')");
-	}
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(make_uniq<ConstantExpression>(table.catalog.GetName()));
+	arguments.push_back(make_uniq<ConstantExpression>(table.schema.name));
+	arguments.push_back(make_uniq<ConstantExpression>(table.name));
+	arguments.push_back(make_uniq<ConstantExpression>(info.index_name));
+	arguments.push_back(
+	    make_uniq<ConstantExpression>(Value::BOOLEAN(info.constraint_type == IndexConstraintType::NONE)));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(expression_kinds))));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(expression_values))));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(option_keys))));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(option_values))));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::BOOLEAN, std::move(option_nulls))));
 
-	auto &table_info = table.Cast<IcebergTableEntry>().table_info;
-	auto id_name = info.expressions[0]->Cast<ColumnRefExpression>().GetColumnName();
-	auto content_name = info.expressions[1]->Cast<ColumnRefExpression>().GetColumnName();
-	auto &schemas = table_info.table_metadata.GetSchemas();
-	auto schema_entry = schemas.find(table_info.table_metadata.GetCurrentSchemaId());
-	if (schema_entry == schemas.end()) {
-		throw InternalException("Iceberg table has no current schema");
-	}
-	vector<string> id_path;
-	id_path.push_back(id_name);
-	vector<string> content_path;
-	content_path.push_back(content_name);
-	auto id_column = schema_entry->second->GetFromPath(id_path, nullptr);
-	auto content_column = schema_entry->second->GetFromPath(content_path, nullptr);
-	if (!id_column || !content_column) {
-		throw BinderException("FIVETRAN_AI index columns must exist in the current Iceberg schema");
-	}
-	if (id_column->type.id() != LogicalTypeId::VARCHAR || content_column->type.id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("FIVETRAN_AI BM25 index columns must both be VARCHAR");
-	}
-
-	auto definitions =
-	    GetFivetranAIBM25IndexDefinitions(table_info.table_metadata.table_properties, *schema_entry->second);
-	for (auto &definition : definitions) {
-		if (StringUtil::CIEquals(definition.name, info.index_name)) {
-			throw CatalogException("BM25 index with name \"%s\" already exists", info.index_name);
-		}
-	}
-	definitions.push_back({info.index_name, id_column->id, content_column->id, id_name, content_name});
-	return BindFivetranAIBM25Refresh(binder, table.Cast<IcebergTableEntry>(), std::move(definitions), true);
+	TableFunctionRef provider;
+	// Index extensions opt in to Iceberg persistence by registering
+	// <index type>_iceberg_create_index. The catalog only transports syntax;
+	// validation and artifact planning remain with the index extension.
+	provider.function = make_uniq<FunctionExpression>(StringUtil::Lower(info.index_type) + "_iceberg_create_index",
+	                                                 std::move(arguments));
+	auto provider_binder = Binder::CreateBinder(binder.context, &binder);
+	return provider_binder->Bind(static_cast<TableRef &>(provider)).plan;
 }
 
 bool IcebergCatalog::InMemory() {

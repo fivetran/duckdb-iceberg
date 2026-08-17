@@ -56,7 +56,7 @@ static unique_ptr<FunctionData> IcebergScanDeserialize(Deserializer &deserialize
 	throw NotImplementedException("IcebergScan deserialization not implemented");
 }
 
-static Value BoundScanInfoValue(const IcebergBoundScanMetadataV1 &metadata) {
+static Value BoundScanInfoValue(const IcebergBoundScanMetadata &metadata) {
 	child_list_t<LogicalType> property_types {{"key", LogicalType::VARCHAR}, {"value", LogicalType::VARCHAR}};
 	child_list_t<LogicalType> blob_types {
 	    {"statistics_path", LogicalType::VARCHAR},
@@ -98,40 +98,25 @@ static Value BoundScanInfoValue(const IcebergBoundScanMetadataV1 &metadata) {
 			}));
 		}
 	}
+	vector<Value> fields;
+	for (auto &field : metadata.fields) {
+		fields.push_back(Value::STRUCT({{"field_id", Value::INTEGER(field.field_id)}, {"name", field.name}}));
+	}
+	vector<Value> properties;
+	for (auto &property : metadata.properties) {
+		properties.push_back(Value::STRUCT({{"key", property.first}, {"value", property.second}}));
+	}
+	child_list_t<LogicalType> field_types {{"field_id", LogicalType::INTEGER}, {"name", LogicalType::VARCHAR}};
 	return Value::STRUCT({
-	    {"contract_version", Value::UINTEGER(FIVETRAN_BOUND_SCAN_VERSION)},
+	    {"contract_version", Value::UINTEGER(ICEBERG_BOUND_SCAN_VERSION)},
 	    {"has_snapshot", Value::BOOLEAN(metadata.has_snapshot)},
 	    {"snapshot_id", Value::BIGINT(metadata.snapshot_id)},
 	    {"sequence_number", Value::BIGINT(metadata.sequence_number)},
 	    {"schema_id", Value::INTEGER(metadata.schema_id)},
+	    {"table_location", metadata.table_location},
+	    {"fields", Value::LIST(LogicalType::STRUCT(field_types), std::move(fields))},
 	    {"blobs", Value::LIST(LogicalType::STRUCT(blob_types), std::move(blobs))},
-	});
-}
-
-static Value BoundScanInfoValueV2(const IcebergBoundScanMetadataV2 &metadata) {
-	child_list_t<LogicalType> definition_types {
-	    {"name", LogicalType::VARCHAR},
-	    {"stable_id_field_id", LogicalType::INTEGER},
-	    {"content_field_id", LogicalType::INTEGER},
-	};
-	vector<Value> definitions;
-	for (auto &definition : metadata.definitions) {
-		definitions.push_back(Value::STRUCT({
-		    {"name", definition.name},
-		    {"stable_id_field_id", Value::INTEGER(definition.stable_id_field_id)},
-		    {"content_field_id", Value::INTEGER(definition.content_field_id)},
-		}));
-	}
-	auto v1 = BoundScanInfoValue(metadata);
-	auto &fields = StructValue::GetChildren(v1);
-	return Value::STRUCT({
-	    {"contract_version", Value::UINTEGER(FIVETRAN_BOUND_SCAN_VERSION_V2)},
-	    {"has_snapshot", fields[1]},
-	    {"snapshot_id", fields[2]},
-	    {"sequence_number", fields[3]},
-	    {"schema_id", fields[4]},
-	    {"blobs", fields[5]},
-	    {"definitions", Value::LIST(LogicalType::STRUCT(definition_types), std::move(definitions))},
+	    {"properties", Value::LIST(LogicalType::STRUCT(property_types), std::move(properties))},
 	});
 }
 
@@ -143,8 +128,7 @@ BindInfo IcebergBindInfo(const optional_ptr<FunctionData> bind_data) {
 		return BindInfo(ScanType::EXTERNAL);
 	}
 	BindInfo result(*table);
-	result.InsertOption(FIVETRAN_BOUND_SCAN_OPTION_V1, BoundScanInfoValue(file_list.GetBoundScanMetadata()));
-	result.InsertOption(FIVETRAN_BOUND_SCAN_OPTION_V2, BoundScanInfoValueV2(file_list.GetBoundScanMetadataV2()));
+	result.InsertOption(ICEBERG_BOUND_SCAN_OPTION, BoundScanInfoValue(file_list.GetBoundScanMetadata()));
 	return result;
 }
 

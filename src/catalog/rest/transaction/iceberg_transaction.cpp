@@ -744,7 +744,7 @@ void IcebergTransaction::CleanupFiles() {
 			auto &transaction_data = table.transaction_data;
 			for (auto &update : transaction_data->updates) {
 				if (update->type == IcebergTableUpdateType::SET_STATISTICS) {
-					auto &set_statistics = update->Cast<SetFivetranAIStatistics>();
+					auto &set_statistics = update->Cast<SetPuffinStatistics>();
 					if (fs.TryRemoveFile(set_statistics.statistics_path)) {
 						DUCKDB_LOG(temp_context, IcebergLogType,
 						           "Iceberg Transaction Cleanup, deleted 'statistics_file': '%s'",

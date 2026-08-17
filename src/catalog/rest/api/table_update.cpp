@@ -23,30 +23,39 @@ static rest_api_objects::Schema CopySchema(const IcebergTableSchema &schema) {
 	return rest_api_objects::Schema::FromJSON(val);
 }
 
-SetFivetranAIStatistics::SetFivetranAIStatistics(const IcebergTableInformation &table_info, string statistics_path_p,
-                                                 vector<string> index_names_p, int64_t snapshot_id_p,
-                                                 int64_t sequence_number_p)
+SetPuffinStatistics::SetPuffinStatistics(const IcebergTableInformation &table_info, string statistics_path_p,
+                                         vector<ExpectedPuffinBlob> expected_blobs_p, int64_t snapshot_id_p,
+                                         int64_t sequence_number_p)
     : IcebergTableUpdate(TYPE, table_info), statistics_path(std::move(statistics_path_p)),
-      index_names(std::move(index_names_p)), snapshot_id(snapshot_id_p), sequence_number(sequence_number_p) {
+      expected_blobs(std::move(expected_blobs_p)), snapshot_id(snapshot_id_p), sequence_number(sequence_number_p) {
 }
 
-void SetFivetranAIStatistics::CreateUpdate(DatabaseInstance &, ClientContext &context,
-                                           IcebergCommitState &commit_state) const {
+void SetPuffinStatistics::CreateUpdate(DatabaseInstance &, ClientContext &context,
+                                       IcebergCommitState &commit_state) const {
 	auto &file_system = FileSystem::GetFileSystem(context);
 	auto file = file_system.OpenFile(statistics_path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
-	auto puffin = PuffinFile::Read(*file, "BM25 statistics file '" + statistics_path + "'");
-	if (puffin.blobs.size() != index_names.size()) {
-		throw IOException("BM25 Puffin file '%s' does not contain every declared index", statistics_path);
+	auto puffin = PuffinFile::Read(*file, "statistics file '" + statistics_path + "'");
+	if (puffin.blobs.size() != expected_blobs.size()) {
+		throw IOException("Puffin file '%s' does not contain every declared blob", statistics_path);
 	}
-	case_insensitive_set_t expected_names(index_names.begin(), index_names.end());
+	vector<bool> matched(expected_blobs.size(), false);
 	vector<rest_api_objects::BlobMetadata> blob_metadata;
 	for (auto &blob : puffin.blobs) {
-		auto index_property = blob.properties.find("index-name");
-		if (blob.type != "fivetran-tantivy-bm25-v1" || blob.snapshot_id != snapshot_id ||
-		    blob.sequence_number != sequence_number || index_property == blob.properties.end() ||
-		    expected_names.erase(index_property->second) != 1) {
-			throw IOException("BM25 Puffin file '%s' does not match the index publication", statistics_path);
+		idx_t match = expected_blobs.size();
+		for (idx_t index = 0; index < expected_blobs.size(); index++) {
+			if (matched[index] || blob.type != expected_blobs[index].type) {
+				continue;
+			}
+			auto property = blob.properties.find(expected_blobs[index].property_key);
+			if (property != blob.properties.end() && property->second == expected_blobs[index].property_value) {
+				match = index;
+				break;
+			}
 		}
+		if (blob.snapshot_id != snapshot_id || blob.sequence_number != sequence_number || match == expected_blobs.size()) {
+			throw IOException("Puffin file '%s' does not match the declared publication", statistics_path);
+		}
+		matched[match] = true;
 		blob_metadata.emplace_back();
 		auto &result = blob_metadata.back();
 		result.type = blob.type;
@@ -56,8 +65,10 @@ void SetFivetranAIStatistics::CreateUpdate(DatabaseInstance &, ClientContext &co
 		result.properties = blob.properties;
 		result.has_properties = !blob.properties.empty();
 	}
-	if (!expected_names.empty()) {
-		throw IOException("BM25 Puffin file '%s' does not contain every declared index", statistics_path);
+	for (auto value : matched) {
+		if (!value) {
+			throw IOException("Puffin file '%s' does not contain every declared blob", statistics_path);
+		}
 	}
 
 	commit_state.table_change.updates.emplace_back();
