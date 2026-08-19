@@ -52,7 +52,8 @@ void SetPuffinStatistics::CreateUpdate(DatabaseInstance &, ClientContext &contex
 				break;
 			}
 		}
-		if (blob.snapshot_id != snapshot_id || blob.sequence_number != sequence_number || match == expected_blobs.size()) {
+		if (blob.snapshot_id != snapshot_id || blob.sequence_number != sequence_number ||
+		    match == expected_blobs.size()) {
 			throw IOException("Puffin file '%s' does not match the declared publication", statistics_path);
 		}
 		matched[match] = true;

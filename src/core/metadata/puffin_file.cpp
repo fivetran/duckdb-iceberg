@@ -129,9 +129,9 @@ PuffinFileMetadata ReadPuffin(idx_t file_size, const ReadAt &read_at, const stri
 } // namespace
 
 PuffinFileMetadata PuffinFile::Read(FileHandle &file, const string &description) {
-	return ReadPuffin(file.GetFileSize(),
-	                  [&](data_ptr_t output, idx_t size, idx_t offset) { file.Read(output, size, offset); },
-	                  description);
+	return ReadPuffin(
+	    file.GetFileSize(), [&](data_ptr_t output, idx_t size, idx_t offset) { file.Read(output, size, offset); },
+	    description);
 }
 
 PuffinFileMetadata PuffinFile::Read(CachingFileHandle &file, const string &description) {

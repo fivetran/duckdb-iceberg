@@ -27,7 +27,6 @@ struct IcebergBoundStatisticsFile {
 	int64_t snapshot_id;
 	string path;
 	int64_t file_size;
-	int64_t footer_size;
 	vector<IcebergBoundBlob> blobs;
 };
 

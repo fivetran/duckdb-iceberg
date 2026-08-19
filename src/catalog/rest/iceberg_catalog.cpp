@@ -175,7 +175,7 @@ unique_ptr<LogicalOperator> IcebergCatalog::BindCreateIndex(Binder &binder, Crea
 	// <index type>_iceberg_create_index. The catalog only transports syntax;
 	// validation and artifact planning remain with the index extension.
 	provider.function = make_uniq<FunctionExpression>(StringUtil::Lower(info.index_type) + "_iceberg_create_index",
-	                                                 std::move(arguments));
+	                                                  std::move(arguments));
 	auto provider_binder = Binder::CreateBinder(binder.context, &binder);
 	return provider_binder->Bind(static_cast<TableRef &>(provider)).plan;
 }

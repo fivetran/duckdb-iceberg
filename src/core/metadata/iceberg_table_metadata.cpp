@@ -457,7 +457,6 @@ IcebergTableMetadata IcebergTableMetadata::FromTableMetadata(const rest_api_obje
 		statistics.snapshot_id = statistics_file.snapshot_id;
 		statistics.path = statistics_file.statistics_path;
 		statistics.file_size = statistics_file.file_size_in_bytes;
-		statistics.footer_size = statistics_file.file_footer_size_in_bytes;
 		for (auto &blob_metadata : statistics_file.blob_metadata) {
 			IcebergBoundBlob blob;
 			blob.type = blob_metadata.type;

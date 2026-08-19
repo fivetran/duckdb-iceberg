@@ -16,7 +16,8 @@ vector<string> StringList(const Value &value, const string &name) {
 	vector<string> result;
 	for (auto &child : ListValue::GetChildren(value)) {
 		if (child.IsNull() || child.type().id() != LogicalTypeId::VARCHAR) {
-			throw InvalidInputException("iceberg_prepare_puffin_statistics requires %s to contain VARCHAR values", name);
+			throw InvalidInputException("iceberg_prepare_puffin_statistics requires %s to contain VARCHAR values",
+			                            name);
 		}
 		result.push_back(child.GetValue<string>());
 	}
@@ -77,7 +78,7 @@ unique_ptr<FunctionData> BindPreparePuffinStatistics(ClientContext &context, Tab
 			}
 		}
 		transaction_data.TableSetPuffinStatistics(input.inputs[1].GetValue<string>(), std::move(expected_blobs),
-		                                            snapshot_id, sequence_number);
+		                                          snapshot_id, sequence_number);
 	});
 
 	return_types.push_back(LogicalType::BIGINT);

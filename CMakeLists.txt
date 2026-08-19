@@ -112,6 +112,7 @@ set(EXTENSION_SOURCES
 	src/planning/metadata_io/manifest_list/bound_iceberg_manifest_list_entry.cpp
 	src/planning/metadata_io/manifest_list/iceberg_manifest_list_reader.cpp
 	src/planning/pruning/iceberg_predicate.cpp
+	src/planning/snapshot/iceberg_scan_info.cpp
 	src/planning/snapshot/iceberg_snapshot_lookup.cpp
 	src/storage/statistics/iceberg_variant_statistics.cpp
 	src/storage/statistics/iceberg_statistics.cpp
