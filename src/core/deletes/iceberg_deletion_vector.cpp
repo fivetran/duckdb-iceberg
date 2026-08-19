@@ -134,14 +134,18 @@ shared_ptr<IcebergDeletionVectorData> IcebergDeletionVectorData::FromBlob(const 
 	return result_p;
 }
 
-//! Verify the generic Puffin container and ensure its deletion-vector descriptor agrees with the manifest.
+//! Verify the generic Puffin container and ensure a deletion-vector descriptor agrees with the manifest.
+//! A single Puffin file may carry many deletion vectors (Spark packs one blob per data file);
+//! the manifest entry identifies its blob by content offset and size.
 static void VerifyPuffinDeletionVector(CachingFileHandle &handle, int64_t content_offset, int64_t content_size) {
 	auto metadata = PuffinFile::Read(handle, "deletion vector file");
-	if (metadata.blobs.size() != 1 || metadata.blobs[0].type != "deletion-vector-v1" ||
-	    metadata.blobs[0].offset != NumericCast<idx_t>(content_offset) ||
-	    metadata.blobs[0].length != NumericCast<idx_t>(content_size)) {
-		throw InvalidConfigurationException("Deletion vector Puffin metadata does not match its manifest entry");
+	for (auto &blob : metadata.blobs) {
+		if (blob.type == "deletion-vector-v1" && blob.offset == NumericCast<idx_t>(content_offset) &&
+		    blob.length == NumericCast<idx_t>(content_size)) {
+			return;
+		}
 	}
+	throw InvalidConfigurationException("Deletion vector Puffin metadata does not match its manifest entry");
 }
 
 void IcebergMultiFileList::ScanPuffinFile(const BoundIcebergManifestEntry &bound_entry) const {
