@@ -11,6 +11,7 @@
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "regex"
@@ -138,6 +139,15 @@ unique_ptr<LogicalOperator> IcebergCatalog::BindCreateIndex(Binder &binder, Crea
                                                             TableCatalogEntry &table,
                                                             unique_ptr<LogicalOperator> plan) {
 	auto &info = stmt.info->Cast<CreateIndexInfo>();
+	// Index extensions opt in to Iceberg persistence by registering
+	// <index type>_iceberg_create_index. Without a registered provider the index
+	// type (including DuckDB's default ART) is not supported on Iceberg tables.
+	auto provider_name = StringUtil::Lower(info.index_type) + "_iceberg_create_index";
+	auto provider_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(binder.context, SYSTEM_CATALOG, DEFAULT_SCHEMA,
+	                                                                   provider_name, OnEntryNotFound::RETURN_NULL);
+	if (!provider_entry) {
+		throw NotImplementedException("Index type '%s' is not supported for Iceberg tables", info.index_type);
+	}
 	vector<Value> expression_kinds;
 	vector<Value> expression_values;
 	for (auto &expression : info.expressions) {
@@ -171,11 +181,9 @@ unique_ptr<LogicalOperator> IcebergCatalog::BindCreateIndex(Binder &binder, Crea
 	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::BOOLEAN, std::move(option_nulls))));
 
 	TableFunctionRef provider;
-	// Index extensions opt in to Iceberg persistence by registering
-	// <index type>_iceberg_create_index. The catalog only transports syntax;
-	// validation and artifact planning remain with the index extension.
-	provider.function = make_uniq<FunctionExpression>(StringUtil::Lower(info.index_type) + "_iceberg_create_index",
-	                                                  std::move(arguments));
+	// The catalog only transports syntax; validation and artifact planning
+	// remain with the index extension.
+	provider.function = make_uniq<FunctionExpression>(provider_name, std::move(arguments));
 	auto provider_binder = Binder::CreateBinder(binder.context, &binder);
 	return provider_binder->Bind(static_cast<TableRef &>(provider)).plan;
 }
