@@ -37,6 +37,7 @@ private:
 	static TableFunctionSet SetIcebergTablePropertiesFunctions();
 	static TableFunctionSet RemoveIcebergTablePropertiesFunctions();
 	static TableFunctionSet GetIcebergSchemaPropertiesFunctions();
+	static TableFunctionSet GetPreparePuffinStatisticsFunction();
 	static TableFunctionSet SetIcebergSchemaPropertiesFunctions();
 	static TableFunctionSet RemoveIcebergSchemaPropertiesFunctions();
 };

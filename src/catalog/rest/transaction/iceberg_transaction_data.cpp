@@ -24,6 +24,13 @@ IcebergTransactionData::IcebergTransactionData(ClientContext &context, const Ice
 	initial_schema_id = table_info.table_metadata.GetCurrentSchemaId();
 }
 
+void IcebergTransactionData::TableSetPuffinStatistics(const string &statistics_path,
+                                                      vector<ExpectedPuffinBlob> expected_blobs, int64_t snapshot_id,
+                                                      int64_t sequence_number) {
+	updates.push_back(make_uniq<SetPuffinStatistics>(table_info, statistics_path, std::move(expected_blobs),
+	                                                 snapshot_id, sequence_number));
+}
+
 void IcebergTransactionData::CacheExistingManifestList(lock_guard<mutex> &guard, const IcebergTableMetadata &metadata) {
 	if (!alters.empty()) {
 		return;

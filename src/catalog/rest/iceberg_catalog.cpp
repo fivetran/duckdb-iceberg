@@ -7,6 +7,13 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/parsed_data/create_index_info.hpp"
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "regex"
 
 #include "catalog/rest/catalog_entry/schema/iceberg_schema_entry.hpp"
@@ -131,7 +138,54 @@ void IcebergCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 unique_ptr<LogicalOperator> IcebergCatalog::BindCreateIndex(Binder &binder, CreateStatement &stmt,
                                                             TableCatalogEntry &table,
                                                             unique_ptr<LogicalOperator> plan) {
-	throw NotImplementedException("IcebergCatalog BindCreateIndex");
+	auto &info = stmt.info->Cast<CreateIndexInfo>();
+	// Index extensions opt in to Iceberg persistence by registering
+	// <index type>_iceberg_create_index. Without a registered provider the index
+	// type (including DuckDB's default ART) is not supported on Iceberg tables.
+	auto provider_name = StringUtil::Lower(info.index_type) + "_iceberg_create_index";
+	auto provider_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(binder.context, SYSTEM_CATALOG, DEFAULT_SCHEMA,
+	                                                                   provider_name, OnEntryNotFound::RETURN_NULL);
+	if (!provider_entry) {
+		throw NotImplementedException("Index type '%s' is not supported for Iceberg tables", info.index_type);
+	}
+	vector<Value> expression_kinds;
+	vector<Value> expression_values;
+	for (auto &expression : info.expressions) {
+		if (expression->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+			expression_kinds.push_back("column");
+			expression_values.push_back(expression->Cast<ColumnRefExpression>().GetColumnName());
+		} else {
+			expression_kinds.push_back("expression");
+			expression_values.push_back(expression->ToString());
+		}
+	}
+	vector<Value> option_keys;
+	vector<Value> option_values;
+	vector<Value> option_nulls;
+	for (auto &option : info.options) {
+		option_keys.push_back(option.first);
+		option_values.push_back(option.second.IsNull() ? Value("") : Value(option.second.ToString()));
+		option_nulls.push_back(Value::BOOLEAN(option.second.IsNull()));
+	}
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(make_uniq<ConstantExpression>(table.catalog.GetName()));
+	arguments.push_back(make_uniq<ConstantExpression>(table.schema.name));
+	arguments.push_back(make_uniq<ConstantExpression>(table.name));
+	arguments.push_back(make_uniq<ConstantExpression>(info.index_name));
+	arguments.push_back(
+	    make_uniq<ConstantExpression>(Value::BOOLEAN(info.constraint_type == IndexConstraintType::NONE)));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(expression_kinds))));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(expression_values))));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(option_keys))));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(option_values))));
+	arguments.push_back(make_uniq<ConstantExpression>(Value::LIST(LogicalType::BOOLEAN, std::move(option_nulls))));
+
+	TableFunctionRef provider;
+	// The catalog only transports syntax; validation and artifact planning
+	// remain with the index extension.
+	provider.function = make_uniq<FunctionExpression>(provider_name, std::move(arguments));
+	auto provider_binder = Binder::CreateBinder(binder.context, &binder);
+	return provider_binder->Bind(static_cast<TableRef &>(provider)).plan;
 }
 
 bool IcebergCatalog::InMemory() {

@@ -56,6 +56,70 @@ static unique_ptr<FunctionData> IcebergScanDeserialize(Deserializer &deserialize
 	throw NotImplementedException("IcebergScan deserialization not implemented");
 }
 
+static Value BoundScanInfoValue(const IcebergBoundScanMetadata &metadata) {
+	child_list_t<LogicalType> property_types {{"key", LogicalType::VARCHAR}, {"value", LogicalType::VARCHAR}};
+	child_list_t<LogicalType> blob_types {
+	    {"statistics_path", LogicalType::VARCHAR},
+	    {"file_size", LogicalType::BIGINT},
+	    {"blob_type", LogicalType::VARCHAR},
+	    {"blob_snapshot_id", LogicalType::BIGINT},
+	    {"blob_sequence_number", LogicalType::BIGINT},
+	    {"field_ids", LogicalType::LIST(LogicalType::INTEGER)},
+	    {"field_names", LogicalType::LIST(LogicalType::VARCHAR)},
+	    {"properties", LogicalType::LIST(LogicalType::STRUCT(property_types))},
+	};
+	vector<Value> blobs;
+	for (auto &statistics : metadata.statistics) {
+		for (auto &blob : statistics.blobs) {
+			vector<Value> field_ids;
+			vector<Value> field_names;
+			for (auto field_id : blob.fields) {
+				field_ids.push_back(Value::INTEGER(field_id));
+				for (auto &field : metadata.fields) {
+					if (field.field_id == field_id) {
+						field_names.push_back(field.name);
+						break;
+					}
+				}
+			}
+			vector<Value> properties;
+			for (auto &property : blob.properties) {
+				properties.push_back(Value::STRUCT({{"key", property.first}, {"value", property.second}}));
+			}
+			blobs.push_back(Value::STRUCT({
+			    {"statistics_path", statistics.path},
+			    {"file_size", Value::BIGINT(statistics.file_size)},
+			    {"blob_type", blob.type},
+			    {"blob_snapshot_id", Value::BIGINT(blob.snapshot_id)},
+			    {"blob_sequence_number", Value::BIGINT(blob.sequence_number)},
+			    {"field_ids", Value::LIST(LogicalType::INTEGER, std::move(field_ids))},
+			    {"field_names", Value::LIST(LogicalType::VARCHAR, std::move(field_names))},
+			    {"properties", Value::LIST(LogicalType::STRUCT(property_types), std::move(properties))},
+			}));
+		}
+	}
+	vector<Value> fields;
+	for (auto &field : metadata.fields) {
+		fields.push_back(Value::STRUCT({{"field_id", Value::INTEGER(field.field_id)}, {"name", field.name}}));
+	}
+	vector<Value> properties;
+	for (auto &property : metadata.properties) {
+		properties.push_back(Value::STRUCT({{"key", property.first}, {"value", property.second}}));
+	}
+	child_list_t<LogicalType> field_types {{"field_id", LogicalType::INTEGER}, {"name", LogicalType::VARCHAR}};
+	return Value::STRUCT({
+	    {"contract_version", Value::UINTEGER(ICEBERG_BOUND_SCAN_VERSION)},
+	    {"has_snapshot", Value::BOOLEAN(metadata.has_snapshot)},
+	    {"snapshot_id", Value::BIGINT(metadata.snapshot_id)},
+	    {"sequence_number", Value::BIGINT(metadata.sequence_number)},
+	    {"schema_id", Value::INTEGER(metadata.schema_id)},
+	    {"table_location", metadata.table_location},
+	    {"fields", Value::LIST(LogicalType::STRUCT(field_types), std::move(fields))},
+	    {"blobs", Value::LIST(LogicalType::STRUCT(blob_types), std::move(blobs))},
+	    {"properties", Value::LIST(LogicalType::STRUCT(property_types), std::move(properties))},
+	});
+}
+
 BindInfo IcebergBindInfo(const optional_ptr<FunctionData> bind_data) {
 	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
 	auto &file_list = multi_file_data.file_list->Cast<IcebergMultiFileList>();
@@ -63,7 +127,9 @@ BindInfo IcebergBindInfo(const optional_ptr<FunctionData> bind_data) {
 	if (!table) {
 		return BindInfo(ScanType::EXTERNAL);
 	}
-	return BindInfo(*table);
+	BindInfo result(*table);
+	result.InsertOption(ICEBERG_BOUND_SCAN_OPTION, BoundScanInfoValue(file_list.GetBoundScanMetadata()));
+	return result;
 }
 
 //! FIXME: needs v1.5.1, causes a crash on v1.5.0

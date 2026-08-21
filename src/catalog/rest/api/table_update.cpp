@@ -1,6 +1,8 @@
 #include "catalog/rest/api/table_update.hpp"
 #include "duckdb/common/exception.hpp"
 #include "catalog/rest/iceberg_table_set.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "core/metadata/puffin_file.hpp"
 
 namespace duckdb {
 
@@ -19,6 +21,79 @@ static rest_api_objects::Schema CopySchema(const IcebergTableSchema &schema) {
 	    yyjson_read(schema_str.c_str(), strlen(schema_str.c_str()), 0));
 	yyjson_val *val = yyjson_doc_get_root(new_doc.get());
 	return rest_api_objects::Schema::FromJSON(val);
+}
+
+SetPuffinStatistics::SetPuffinStatistics(const IcebergTableInformation &table_info, string statistics_path_p,
+                                         vector<ExpectedPuffinBlob> expected_blobs_p, int64_t snapshot_id_p,
+                                         int64_t sequence_number_p)
+    : IcebergTableUpdate(TYPE, table_info), statistics_path(std::move(statistics_path_p)),
+      expected_blobs(std::move(expected_blobs_p)), snapshot_id(snapshot_id_p), sequence_number(sequence_number_p) {
+}
+
+void SetPuffinStatistics::CreateUpdate(DatabaseInstance &, ClientContext &context,
+                                       IcebergCommitState &commit_state) const {
+	auto &file_system = FileSystem::GetFileSystem(context);
+	auto file = file_system.OpenFile(statistics_path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
+	auto puffin = PuffinFile::Read(*file, "statistics file '" + statistics_path + "'");
+	if (puffin.blobs.size() != expected_blobs.size()) {
+		throw IOException("Puffin file '%s' does not contain every declared blob", statistics_path);
+	}
+	vector<bool> matched(expected_blobs.size(), false);
+	vector<rest_api_objects::BlobMetadata> blob_metadata;
+	for (auto &blob : puffin.blobs) {
+		idx_t match = expected_blobs.size();
+		for (idx_t index = 0; index < expected_blobs.size(); index++) {
+			if (matched[index] || blob.type != expected_blobs[index].type) {
+				continue;
+			}
+			auto property = blob.properties.find(expected_blobs[index].property_key);
+			if (property != blob.properties.end() && property->second == expected_blobs[index].property_value) {
+				match = index;
+				break;
+			}
+		}
+		if (blob.snapshot_id != snapshot_id || blob.sequence_number != sequence_number ||
+		    match == expected_blobs.size()) {
+			throw IOException("Puffin file '%s' does not match the declared publication", statistics_path);
+		}
+		matched[match] = true;
+		blob_metadata.emplace_back();
+		auto &result = blob_metadata.back();
+		result.type = blob.type;
+		result.snapshot_id = blob.snapshot_id;
+		result.sequence_number = blob.sequence_number;
+		result.fields = blob.fields;
+		result.properties = blob.properties;
+		result.has_properties = !blob.properties.empty();
+	}
+	for (auto value : matched) {
+		if (!value) {
+			throw IOException("Puffin file '%s' does not contain every declared blob", statistics_path);
+		}
+	}
+
+	commit_state.table_change.updates.emplace_back();
+	auto &table_update = commit_state.table_change.updates.back();
+	table_update.has_set_statistics_update = true;
+	auto &set_statistics = table_update.set_statistics_update;
+	set_statistics.has_action = true;
+	set_statistics.action = "set-statistics";
+	set_statistics.has_snapshot_id = true;
+	set_statistics.snapshot_id = snapshot_id;
+	auto &statistics = set_statistics.statistics;
+	statistics.snapshot_id = snapshot_id;
+	statistics.statistics_path = statistics_path;
+	statistics.file_size_in_bytes = NumericCast<int64_t>(puffin.file_size);
+	statistics.file_footer_size_in_bytes = NumericCast<int64_t>(puffin.footer_size);
+	statistics.blob_metadata = std::move(blob_metadata);
+
+	commit_state.table_change.requirements.emplace_back();
+	auto &requirement = commit_state.table_change.requirements.back();
+	requirement.has_assert_ref_snapshot_id = true;
+	requirement.assert_ref_snapshot_id.type.value = "assert-ref-snapshot-id";
+	requirement.assert_ref_snapshot_id.ref = "main";
+	requirement.assert_ref_snapshot_id.has_snapshot_id = true;
+	requirement.assert_ref_snapshot_id.snapshot_id = snapshot_id;
 }
 
 AddSchemaUpdate::AddSchemaUpdate(const IcebergTableInformation &table_info, int32_t schema_id)

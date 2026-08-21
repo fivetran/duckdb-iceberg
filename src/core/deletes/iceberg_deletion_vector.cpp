@@ -1,4 +1,5 @@
 #include "core/deletes/iceberg_deletion_vector.hpp"
+#include "core/metadata/puffin_file.hpp"
 
 #include "duckdb/storage/caching_file_system.hpp"
 #include "duckdb/common/bswap.hpp"
@@ -133,62 +134,18 @@ shared_ptr<IcebergDeletionVectorData> IcebergDeletionVectorData::FromBlob(const 
 	return result_p;
 }
 
-//! Verify a deletion-vector file is a structurally-valid Puffin container before reading it. The
-//! footer payload must be uncompressed (checked unconditionally): the Puffin spec permits an
-//! LZ4-compressed footer, but a deletion-vector footer must be plain so any reader walking the
-//! footer can parse the FileMetadata without a decompressor. In debug builds we additionally parse
-//! the whole container -- leading/footer/trailing magic, the footer JSON, and that the single
-//! blob's offset/length agree with the manifest content_offset/content_size_in_bytes used below.
+//! Verify the generic Puffin container and ensure a deletion-vector descriptor agrees with the manifest.
+//! A single Puffin file may carry many deletion vectors (Spark packs one blob per data file);
+//! the manifest entry identifies its blob by content offset and size.
 static void VerifyPuffinDeletionVector(CachingFileHandle &handle, int64_t content_offset, int64_t content_size) {
-	constexpr data_t PUFFIN_MAGIC[4] = {0x50, 0x46, 0x41, 0x31}; //! "PFA1"
-	//! Footer trailer layout: FooterPayloadSize (4) | Flags (4) | Magic (4)
-	constexpr idx_t FOOTER_TRAILER_SIZE = sizeof(int32_t) + sizeof(uint32_t) + sizeof(PUFFIN_MAGIC);
-
-	auto file_size = handle.GetFileSize();
-	if (file_size < 2 * sizeof(PUFFIN_MAGIC) + FOOTER_TRAILER_SIZE) {
-		throw InvalidConfigurationException("Deletion vector file is too small to be a valid Puffin file");
+	auto metadata = PuffinFile::Read(handle, "deletion vector file");
+	for (auto &blob : metadata.blobs) {
+		if (blob.type == "deletion-vector-v1" && blob.offset == NumericCast<idx_t>(content_offset) &&
+		    blob.length == NumericCast<idx_t>(content_size)) {
+			return;
+		}
 	}
-
-	//! Read the footer trailer: validate the trailing magic and that the footer payload is uncompressed.
-	data_ptr_t trailer_ptr = nullptr;
-	auto trailer_buffer = handle.Read(trailer_ptr, FOOTER_TRAILER_SIZE, file_size - FOOTER_TRAILER_SIZE);
-	auto trailer = trailer_buffer.Ptr();
-	if (memcmp(trailer + sizeof(int32_t) + sizeof(uint32_t), PUFFIN_MAGIC, sizeof(PUFFIN_MAGIC)) != 0) {
-		throw InvalidConfigurationException("Deletion vector file is not a valid Puffin file (bad trailing magic)");
-	}
-	//! Flags: bit 0 of the first byte set => FooterPayload is compressed (per the Puffin spec).
-	auto flags = Load<uint32_t>(trailer + sizeof(int32_t));
-	if (flags & 0x1) {
-		throw InvalidConfigurationException(
-		    "Deletion vector Puffin footer payload is compressed; only uncompressed footers are supported");
-	}
-
-#ifdef DEBUG
-	//! Parse the full container and assert it round-trips with the manifest content_offset/size.
-	auto payload_size = Load<int32_t>(trailer);
-	D_ASSERT(payload_size > 0);
-	data_ptr_t file_ptr = nullptr;
-	auto file_buffer = handle.Read(file_ptr, file_size, 0);
-	auto data = file_buffer.Ptr();
-	D_ASSERT(memcmp(data, PUFFIN_MAGIC, sizeof(PUFFIN_MAGIC)) == 0); //! leading magic
-	idx_t payload_start = file_size - FOOTER_TRAILER_SIZE - static_cast<idx_t>(payload_size);
-	D_ASSERT(payload_start >= sizeof(PUFFIN_MAGIC));
-	//! footer leading magic precedes the payload
-	D_ASSERT(memcmp(data + payload_start - sizeof(PUFFIN_MAGIC), PUFFIN_MAGIC, sizeof(PUFFIN_MAGIC)) == 0);
-	auto doc = std::unique_ptr<yyjson_doc, YyjsonDocDeleter>(
-	    yyjson_read(reinterpret_cast<const char *>(data + payload_start), static_cast<size_t>(payload_size), 0));
-	D_ASSERT(doc);
-	auto blobs = yyjson_obj_get(yyjson_doc_get_root(doc.get()), "blobs");
-	D_ASSERT(blobs && yyjson_is_arr(blobs));
-	auto blob = yyjson_arr_get_first(blobs);
-	D_ASSERT(blob);
-	D_ASSERT(yyjson_equals_str(yyjson_obj_get(blob, "type"), "deletion-vector-v1"));
-	D_ASSERT(yyjson_get_sint(yyjson_obj_get(blob, "offset")) == content_offset);
-	D_ASSERT(yyjson_get_sint(yyjson_obj_get(blob, "length")) == content_size);
-#else
-	(void)content_offset;
-	(void)content_size;
-#endif
+	throw InvalidConfigurationException("Deletion vector Puffin metadata does not match its manifest entry");
 }
 
 void IcebergMultiFileList::ScanPuffinFile(const BoundIcebergManifestEntry &bound_entry) const {

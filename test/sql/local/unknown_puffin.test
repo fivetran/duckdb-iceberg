@@ -9,7 +9,8 @@ require iceberg
 
 require httpfs
 
-# Query the latest snapshot.
+# Query the latest snapshot. Its statistics contain an opaque vector-index
+# descriptor whose payload is deliberately not interpreted by Iceberg.
 query III
 select * from ICEBERG_SCAN('__WORKING_DIRECTORY__/data/persistent/unknown_puffin/namespace/test_table') order by all;
 ----

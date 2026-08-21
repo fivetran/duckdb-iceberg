@@ -56,6 +56,7 @@ set(EXTENSION_SOURCES
 	src/core/expression/iceberg_transform.cpp
 	src/core/expression/iceberg_value.cpp
 	src/core/metadata/iceberg_table_metadata.cpp
+	src/core/metadata/puffin_file.cpp
 	src/core/metadata/manifest/iceberg_manifest_list.cpp
 	src/core/metadata/manifest/iceberg_manifest.cpp
 	src/core/metadata/partition/iceberg_partition_spec.cpp
@@ -85,6 +86,7 @@ set(EXTENSION_SOURCES
 	src/function/ducklake/ducklake_data_file.cpp
 	src/function/ducklake/ducklake_delete_file.cpp
 	src/function/iceberg_functions.cpp
+	src/function/prepare_puffin_statistics.cpp
 	src/function/iceberg_scalar_functions.cpp
 	src/function/metadata/iceberg_column_stats.cpp
 	src/function/metadata/iceberg_load_table_response.cpp
@@ -110,6 +112,7 @@ set(EXTENSION_SOURCES
 	src/planning/metadata_io/manifest_list/bound_iceberg_manifest_list_entry.cpp
 	src/planning/metadata_io/manifest_list/iceberg_manifest_list_reader.cpp
 	src/planning/pruning/iceberg_predicate.cpp
+	src/planning/snapshot/iceberg_scan_info.cpp
 	src/planning/snapshot/iceberg_snapshot_lookup.cpp
 	src/storage/statistics/iceberg_variant_statistics.cpp
 	src/storage/statistics/iceberg_statistics.cpp
