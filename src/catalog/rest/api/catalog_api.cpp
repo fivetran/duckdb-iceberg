@@ -792,7 +792,15 @@ vector<rest_api_objects::TableIdentifier> IRCAPI::GetViews(ClientContext &contex
 
 	HTTPHeaders headers;
 	auto response = catalog.auth_handler->Request(RequestType::GET_REQUEST, context, url_builder, headers);
-	if (response->status != HTTPStatusCode::OK_200) {
+	if (!response->Success()) {
+		if (response->status == HTTPStatusCode::Forbidden_403 ||
+		    response->status == HTTPStatusCode::Unauthorized_401 ||
+		    response->status == HTTPStatusCode::NotFound_404) {
+			// Match GetTables and don't fail the whole SHOW TABLES / schema scan
+			DUCKDB_LOG_WARNING(context, "GET %s returned status code %s", url_builder.GetURLEncoded(),
+			                   EnumUtil::ToString(response->status));
+			return {};
+		}
 		throw HTTPException(
 		    *response, "GetViews request to '%s' returned a non-200 status code (%s), with reason: %s, body: %s",
 		    url_builder.GetURLEncoded(), EnumUtil::ToString(response->status), response->reason, response->body);
