@@ -1,0 +1,171 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/views/test_drop_view.test
+# description: test drop view in iceberg catalog
+# group: [views]
+
+require-env ICEBERG_SERVER_AVAILABLE
+
+require avro
+
+require parquet
+
+require iceberg
+
+require httpfs
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+set logging_level='debug'
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.drop_view_schema.test_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.drop_view_schema.view1;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.drop_view_schema.view2;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.drop_view_schema.dependent_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.drop_view_schema.drop_view_table;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.drop_view_schema;
+
+statement ok
+create schema my_datalake.drop_view_schema;
+
+statement ok
+use my_datalake.drop_view_schema;
+
+# Create base table
+statement ok
+create table drop_view_table (id int, value varchar);
+
+statement ok
+insert into drop_view_table values (1, 'test'), (2, 'data');
+
+# Create a view
+statement ok
+create view test_view as select * from drop_view_table;
+
+# Verify view exists
+query II
+select * from test_view order by id;
+----
+1	test
+2	data
+
+# Drop the view
+statement ok
+drop view test_view;
+
+# Error: View should not exist after drop
+statement error
+select * from test_view;
+----
+<REGEX>:.*does not exist.*
+
+# DROP VIEW IF EXISTS should not error on non-existent view
+statement ok
+drop view if exists test_view;
+
+statement ok
+drop view if exists non_existent_view;
+
+# Error: DROP VIEW without IF EXISTS should fail on non-existent view
+statement error
+drop view non_existent_view;
+----
+<REGEX>:.*does not exist.*
+
+# Test dropping view in different schema
+statement ok
+DROP VIEW IF EXISTS my_datalake.drop_test_schema.schema_view;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.drop_test_schema;
+
+statement ok
+create schema my_datalake.drop_test_schema;
+
+statement ok
+create view my_datalake.drop_test_schema.schema_view as select * from drop_view_table;
+
+query II
+select * from my_datalake.drop_test_schema.schema_view order by id;
+----
+1	test
+2	data
+
+statement ok
+drop view my_datalake.drop_test_schema.schema_view;
+
+# Verify view is dropped
+statement error
+select * from my_datalake.drop_test_schema.schema_view;
+----
+<REGEX>:.*does not exist.*
+
+# Test multiple views
+statement ok
+create view view1 as select * from drop_view_table where id = 1;
+
+statement ok
+create view view2 as select * from drop_view_table where id = 2;
+
+query II
+select * from view1;
+----
+1	test
+
+query II
+select * from view2;
+----
+2	data
+
+# Drop both views
+statement ok
+drop view view1;
+
+statement ok
+drop view view2;
+
+# Verify both are dropped
+statement error
+select * from view1;
+----
+<REGEX>:.*does not exist.*
+
+statement error
+select * from view2;
+----
+<REGEX>:.*does not exist.*
+
+# Test that dropping base table doesn't automatically drop views (if applicable)
+# This depends on catalog behavior - some catalogs may have CASCADE behavior
+statement ok
+create view dependent_view as select * from drop_view_table;
+
+statement ok
+drop table drop_view_table;
+
+# The view should still exist in metadata, but querying it may fail
+# This tests metadata persistence vs data availability
+
+# Cleanup
+statement ok
+drop view if exists dependent_view;
+
+statement ok
+drop schema my_datalake.drop_test_schema;
+

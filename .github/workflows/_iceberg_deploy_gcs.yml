@@ -1,0 +1,180 @@
+#
+# Deploy Iceberg Extension and DuckDB Binaries to Google Cloud Storage
+#
+# This workflow downloads artifacts from the distribution workflow and uploads them to GCS.
+# It handles both extension files and DuckDB binaries for all platforms.
+#
+name: Deploy Iceberg to GCS
+
+on:
+  workflow_call:
+    inputs:
+      duckdb_version:
+        description: 'DuckDB version string (e.g., v1.4.2)'
+        required: true
+        type: string
+      deploy_path:
+        description: 'GCS deployment path (e.g., main/{commit}, tag/{tag}, dev/{branch}/{commit})'
+        required: true
+        type: string
+      exclude_archs:
+        description: 'Platforms to exclude (semicolon-separated)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      GCS_HMAC_ACCESS_KEY_ID:
+        required: true
+      GCS_HMAC_SECRET_ACCESS_KEY:
+        required: true
+
+env:
+  EXTENSION_NAME: iceberg
+  GCS_BUCKET: ${{ vars.GCS_BUCKET_NAME }}
+
+jobs:
+  deploy:
+    name: Deploy ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform:
+          - linux_amd64
+          - linux_amd64_musl
+          - linux_arm64
+          - osx_amd64
+          - osx_arm64
+          - windows_amd64
+
+    steps:
+      - name: Check if platform is excluded
+        id: check_excluded
+        run: |
+          EXCLUDED="${{ inputs.exclude_archs }}"
+          PLATFORM="${{ matrix.platform }}"
+
+          if [ -z "$EXCLUDED" ]; then
+            echo "is_excluded=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if platform is in excluded list
+          IFS=';' read -ra EXCLUDED_LIST <<< "$EXCLUDED"
+          for excluded in "${EXCLUDED_LIST[@]}"; do
+            if [ "$excluded" = "$PLATFORM" ]; then
+              echo "Platform $PLATFORM is excluded, skipping deployment"
+              echo "is_excluded=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          done
+
+          echo "is_excluded=false" >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download extension artifact
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.EXTENSION_NAME }}-${{ inputs.duckdb_version }}-extension-${{ matrix.platform }}
+          path: /tmp/extension
+
+      - name: Download DuckDB binary artifact
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: duckdb-${{ inputs.duckdb_version }}-binary-${{ matrix.platform }}
+          path: /tmp/duckdb-binary
+        continue-on-error: true
+
+      - name: Download build metadata
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: metadata-${{ inputs.duckdb_version }}-${{ matrix.platform }}
+          path: /tmp/metadata
+
+      - name: List downloaded artifacts
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        run: |
+          echo "Extension artifacts:"
+          ls -la /tmp/extension/ || echo "No extension artifacts"
+          echo "DuckDB binary artifacts:"
+          ls -la /tmp/duckdb-binary/ || echo "No binary artifacts"
+          echo "Metadata artifacts:"
+          ls -la /tmp/metadata/ || echo "No metadata artifacts"
+
+      - name: Install Google Cloud SDK
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        run: |
+          python3 -m pip install gsutil
+
+      - name: Configure gsutil for HMAC authentication
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        shell: bash
+        env:
+          GCS_HMAC_KEY_ID: ${{ secrets.GCS_HMAC_ACCESS_KEY_ID }}
+          GCS_HMAC_KEY_SECRET: ${{ secrets.GCS_HMAC_SECRET_ACCESS_KEY }}
+        run: |
+          cat > ~/.boto <<EOF
+          [Credentials]
+          gs_access_key_id = $GCS_HMAC_KEY_ID
+          gs_secret_access_key = $GCS_HMAC_KEY_SECRET
+
+          [Boto]
+          https_validate_certificates = True
+
+          [GSUtil]
+          default_project_id = auto
+          EOF
+          echo "Configured gsutil with HMAC authentication"
+
+      - name: Deploy to GCS
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        shell: bash
+        run: |
+          # Determine binary name based on platform
+          if [[ "${{ matrix.platform }}" == windows_* ]]; then
+            BINARY_NAME="duckdb.exe"
+          else
+            BINARY_NAME="duckdb"
+          fi
+
+          # Compress extension
+          echo "Compressing extension..."
+          gzip < "/tmp/extension/${{ env.EXTENSION_NAME }}.duckdb_extension" > "/tmp/${{ env.EXTENSION_NAME }}.duckdb_extension.gz"
+
+          # Upload extension
+          GCS_PATH="gs://${{ env.GCS_BUCKET }}/duckdb-iceberg/${{ inputs.deploy_path }}/${{ matrix.platform }}"
+          echo "Uploading extension to: ${GCS_PATH}/"
+          gsutil cp "/tmp/${{ env.EXTENSION_NAME }}.duckdb_extension.gz" "${GCS_PATH}/${{ env.EXTENSION_NAME }}.duckdb_extension.gz"
+
+          # Upload DuckDB binary if available
+          if [ -f "/tmp/duckdb-binary/${BINARY_NAME}" ]; then
+            echo "Compressing DuckDB binary..."
+            gzip < "/tmp/duckdb-binary/${BINARY_NAME}" > "/tmp/duckdb.gz"
+            echo "Uploading DuckDB binary to: ${GCS_PATH}/"
+            gsutil cp "/tmp/duckdb.gz" "${GCS_PATH}/duckdb.gz"
+          else
+            echo "No DuckDB binary found (expected for some platforms)"
+          fi
+
+          # Upload metadata.json
+          echo "Uploading metadata to: ${GCS_PATH}/"
+          gsutil cp "/tmp/metadata/metadata.json" "${GCS_PATH}/metadata.json"
+
+          echo ""
+          echo "✓ Deployment complete!"
+          echo "  Extension: ${GCS_PATH}/${{ env.EXTENSION_NAME }}.duckdb_extension.gz"
+          echo "  Binary:    ${GCS_PATH}/duckdb.gz"
+          echo "  Metadata:  ${GCS_PATH}/metadata.json"
+
+      - name: Report Deployment
+        if: steps.check_excluded.outputs.is_excluded == 'false'
+        run: |
+          echo "### Deployment Complete: ${{ matrix.platform }}" >> $GITHUB_STEP_SUMMARY
+          echo "Path: gs://${{ env.GCS_BUCKET }}/duckdb-iceberg/${{ inputs.deploy_path }}/${{ matrix.platform }}/" >> $GITHUB_STEP_SUMMARY

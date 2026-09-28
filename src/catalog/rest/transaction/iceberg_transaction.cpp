@@ -201,6 +201,35 @@ void CommitTableToJSON(yyjson_mut_doc *doc, yyjson_mut_val *root_object,
 			//! updates[...].action
 			yyjson_mut_obj_add_strcpy(doc, update_json, "action", ref_update.action.c_str());
 			yyjson_mut_obj_add_strcpy(doc, update_json, "location", ref_update.location.c_str());
+		} else if (update.has_set_statistics_update) {
+			auto update_json = yyjson_mut_arr_add_obj(doc, updates_array);
+			auto &statistics_update = update.set_statistics_update;
+			yyjson_mut_obj_add_strcpy(doc, update_json, "action", statistics_update.action.c_str());
+			auto statistics_json = yyjson_mut_obj_add_obj(doc, update_json, "statistics");
+			auto &statistics = statistics_update.statistics;
+			yyjson_mut_obj_add_int(doc, statistics_json, "snapshot-id", statistics.snapshot_id);
+			yyjson_mut_obj_add_strcpy(doc, statistics_json, "statistics-path", statistics.statistics_path.c_str());
+			yyjson_mut_obj_add_int(doc, statistics_json, "file-size-in-bytes", statistics.file_size_in_bytes);
+			yyjson_mut_obj_add_int(doc, statistics_json, "file-footer-size-in-bytes",
+			                       statistics.file_footer_size_in_bytes);
+			auto blobs_json = yyjson_mut_obj_add_arr(doc, statistics_json, "blob-metadata");
+			for (auto &blob : statistics.blob_metadata) {
+				auto blob_json = yyjson_mut_arr_add_obj(doc, blobs_json);
+				yyjson_mut_obj_add_strcpy(doc, blob_json, "type", blob.type.c_str());
+				yyjson_mut_obj_add_int(doc, blob_json, "snapshot-id", blob.snapshot_id);
+				yyjson_mut_obj_add_int(doc, blob_json, "sequence-number", blob.sequence_number);
+				auto fields_json = yyjson_mut_obj_add_arr(doc, blob_json, "fields");
+				for (auto field : blob.fields) {
+					yyjson_mut_arr_add_int(doc, fields_json, field);
+				}
+				if (blob.has_properties) {
+					auto properties_json = yyjson_mut_obj_add_obj(doc, blob_json, "properties");
+					for (auto &property : blob.properties) {
+						yyjson_mut_obj_add_strcpy(doc, properties_json, property.first.c_str(),
+						                          property.second.c_str());
+					}
+				}
+			}
 		} else {
 			throw NotImplementedException("Can't serialize this TableUpdate type to JSON");
 		}
@@ -714,6 +743,15 @@ void IcebergTransaction::CleanupFiles() {
 			}
 			auto &transaction_data = table.transaction_data;
 			for (auto &update : transaction_data->updates) {
+				if (update->type == IcebergTableUpdateType::SET_STATISTICS) {
+					auto &set_statistics = update->Cast<SetPuffinStatistics>();
+					if (fs.TryRemoveFile(set_statistics.statistics_path)) {
+						DUCKDB_LOG(temp_context, IcebergLogType,
+						           "Iceberg Transaction Cleanup, deleted 'statistics_file': '%s'",
+						           set_statistics.statistics_path);
+					}
+					continue;
+				}
 				if (update->type != IcebergTableUpdateType::ADD_SNAPSHOT) {
 					continue;
 				}

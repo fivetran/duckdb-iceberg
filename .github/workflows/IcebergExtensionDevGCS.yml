@@ -1,0 +1,159 @@
+name: Iceberg Extension Dev GCS
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build and deploy (leave empty for current branch)"
+        required: false
+        type: string
+        default: ""
+      exclude_archs:
+        description: 'Architectures to exclude (semicolon-separated, e.g., "linux_amd64;osx_arm64")'
+        required: false
+        type: string
+        default: "linux_amd64_musl;osx_amd64;windows_amd64;windows_amd64_mingw"
+      skip_deployment:
+        description: "Skip GCS deployment (build artifacts only)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: iceberg-deploy-dev-${{ github.ref }}-${{ github.event.inputs.branch }}
+  cancel-in-progress: true
+
+env:
+  GCS_BUCKET: ${{ vars.GCS_BUCKET_NAME }}
+
+jobs:
+  determine-build-ref:
+    name: Determine Build Reference
+    runs-on: ubuntu-latest
+    outputs:
+      build_ref: ${{ steps.resolve-ref.outputs.build_ref }}
+      build_sha: ${{ steps.resolve-sha.outputs.build_sha }}
+      sanitized_branch: ${{ steps.resolve-ref.outputs.sanitized_branch }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.branch || github.ref }}
+
+      - name: Resolve build ref
+        id: resolve-ref
+        run: |
+          if [ -n "${{ inputs.branch }}" ]; then
+            BUILD_REF="${{ inputs.branch }}"
+            BRANCH_NAME="${{ inputs.branch }}"
+          else
+            BUILD_REF="${{ github.ref }}"
+            BRANCH_NAME="${{ github.ref_name }}"
+          fi
+
+          # Sanitize branch name for GCS path (replace / with -)
+          SANITIZED_BRANCH=$(echo "$BRANCH_NAME" | sed 's/\//-/g')
+
+          echo "build_ref=$BUILD_REF" >> $GITHUB_OUTPUT
+          echo "sanitized_branch=$SANITIZED_BRANCH" >> $GITHUB_OUTPUT
+          echo "Building from ref: $BUILD_REF (branch: $BRANCH_NAME, sanitized: $SANITIZED_BRANCH)"
+
+      - name: Resolve build SHA
+        id: resolve-sha
+        run: |
+          BUILD_SHA=$(git rev-parse HEAD)
+          echo "build_sha=$BUILD_SHA" >> $GITHUB_OUTPUT
+          echo "Build SHA: $BUILD_SHA"
+
+  build-iceberg-extension:
+    name: Build Iceberg Extension
+    needs: determine-build-ref
+    uses: ./.github/workflows/_iceberg_extension_distribution.yml
+    with:
+      # Version configuration - update here to upgrade DuckDB/extension-ci-tools versions
+      duckdb_version: v1.5.0
+      ci_tools_version: v1.5.0p
+      override_git_describe: v1.5.0
+      build_ref: ${{ needs.determine-build-ref.outputs.build_sha }}
+      exclude_archs: ${{ inputs.exclude_archs || 'linux_amd64_musl;osx_amd64;windows_amd64;windows_amd64_mingw' }}
+
+  determine-deploy-path:
+    name: Determine Deploy Path
+    needs: determine-build-ref
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_path: ${{ steps.get-path.outputs.deploy_path }}
+    steps:
+      - name: Determine GCS deploy path
+        id: get-path
+        run: |
+          COMMIT_HASH="${{ needs.determine-build-ref.outputs.build_sha }}"
+          SHORT_COMMIT="${COMMIT_HASH:0:7}"
+          SANITIZED_BRANCH="${{ needs.determine-build-ref.outputs.sanitized_branch }}"
+
+          DEPLOY_PATH="dev/${SANITIZED_BRANCH}/${SHORT_COMMIT}"
+          echo "deploy_path=$DEPLOY_PATH" >> $GITHUB_OUTPUT
+          echo "Deploying to: duckdb-iceberg/$DEPLOY_PATH"
+
+  deploy-to-gcs:
+    name: Deploy to GCS
+    needs: [determine-build-ref, determine-deploy-path, build-iceberg-extension]
+    if: |
+      always() &&
+      needs.build-iceberg-extension.result == 'success' &&
+      !inputs.skip_deployment
+    uses: ./.github/workflows/_iceberg_deploy_gcs.yml
+    secrets:
+      GCS_HMAC_ACCESS_KEY_ID: ${{ secrets.GCS_HMAC_ACCESS_KEY_ID }}
+      GCS_HMAC_SECRET_ACCESS_KEY: ${{ secrets.GCS_HMAC_SECRET_ACCESS_KEY }}
+    with:
+      # Version parameter - keep in sync with env.DUCKDB_VERSION
+      duckdb_version: v1.5.0
+      deploy_path: ${{ needs.determine-deploy-path.outputs.deploy_path }}
+      exclude_archs: ${{ inputs.exclude_archs || 'linux_amd64_musl;osx_amd64;windows_amd64;windows_amd64_mingw' }}
+
+  summary:
+    name: Deployment Summary
+    needs:
+      [
+        determine-build-ref,
+        determine-deploy-path,
+        build-iceberg-extension,
+        deploy-to-gcs,
+      ]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Print summary
+        run: |
+          echo "======================================="
+          echo "Dev Build Complete"
+          echo "======================================="
+          echo ""
+          echo "Branch: ${{ needs.determine-build-ref.outputs.sanitized_branch }}"
+          echo "Commit: ${{ needs.determine-build-ref.outputs.build_sha }}"
+          echo "Excluded platforms: ${{ inputs.exclude_archs || 'linux_amd64_musl;osx_amd64;windows_amd64;windows_amd64_mingw' }}"
+          echo ""
+
+          if [ "${{ needs.deploy-to-gcs.result }}" = "success" ] || [ "${{ needs.deploy-to-gcs.result }}" = "skipped" ]; then
+            SHORT_COMMIT="${{ needs.determine-build-ref.outputs.build_sha }}"
+            SHORT_COMMIT="${SHORT_COMMIT:0:7}"
+            SANITIZED_BRANCH="${{ needs.determine-build-ref.outputs.sanitized_branch }}"
+
+            if [ "${{ inputs.skip_deployment }}" = "true" ]; then
+              echo "Deployment skipped (build artifacts only)"
+              echo ""
+              echo "Artifacts available for download in workflow run"
+            else
+              echo "Deployed to:"
+              echo "  gs://${{ env.GCS_BUCKET }}/duckdb-iceberg/dev/${SANITIZED_BRANCH}/${SHORT_COMMIT}/"
+              echo ""
+              echo "Install URLs for each platform:"
+              echo "  gs://${{ env.GCS_BUCKET }}/duckdb-iceberg/dev/${SANITIZED_BRANCH}/${SHORT_COMMIT}/<platform>/iceberg.duckdb_extension.gz"
+            fi
+          else
+            echo "Deployment failed - check logs above"
+          fi

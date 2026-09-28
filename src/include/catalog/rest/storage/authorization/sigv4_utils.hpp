@@ -87,7 +87,8 @@ inline bool CredentialMatchesStorageType(const string &credential_prefix, const 
 		       StringUtil::StartsWith(credential_prefix, "s3n://");
 	} else if (storage_type == "gcs") {
 		return StringUtil::StartsWith(credential_prefix, "gs://") ||
-		       StringUtil::StartsWith(credential_prefix, "gcs://");
+		       StringUtil::StartsWith(credential_prefix, "gcs://") ||
+		       StringUtil::Contains(credential_prefix, "storage.googleapis.com");
 	} else if (storage_type == "azure") {
 		return StringUtil::StartsWith(credential_prefix, "abfs://") ||
 		       StringUtil::StartsWith(credential_prefix, "abfss://") ||

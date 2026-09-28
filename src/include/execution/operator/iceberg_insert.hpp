@@ -114,6 +114,8 @@ public:
 	//! upstream PhysicalIcebergCreateTable. Sink/Finalize resolve the
 	//! TableCatalogEntry through this shared state instead of `table`.
 	shared_ptr<IcebergCTASCreateState> create_state;
+	//! Whether parallel writes are enabled for this insert
+	bool parallel_writes_enabled = false;
 
 public:
 	// Source interface
@@ -150,7 +152,7 @@ public:
 	}
 
 	bool ParallelSink() const override {
-		return false;
+		return parallel_writes_enabled;
 	}
 
 	string GetName() const override;

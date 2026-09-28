@@ -98,6 +98,26 @@
       "timestamp-ms": 1752413160423
     }
   ],
+  "statistics": [
+    {
+      "snapshot-id": 2160374879266914800,
+      "statistics-path": "data/persistent/unknown_puffin/namespace/test_table/data/index_block_019803f6-c3d7-7281-a56a-8bde6b6259b8.bin",
+      "file-size-in-bytes": 33,
+      "file-footer-size-in-bytes": 0,
+      "blob-metadata": [
+        {
+          "type": "fivetran-hnsw-vector-v1",
+          "snapshot-id": 2160374879266914800,
+          "sequence-number": 1,
+          "fields": [0, 1],
+          "properties": {
+            "index-name": "vector_fixture",
+            "fixture": "opaque-bound-scan-blob"
+          }
+        }
+      ]
+    }
+  ],
   "metadata-log": [
     {
       "metadata-file": "namespace/test_table/metadata/v0.metadata.json",

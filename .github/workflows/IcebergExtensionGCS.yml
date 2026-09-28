@@ -1,0 +1,111 @@
+name: Iceberg Extension GCS
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
+  cancel-in-progress: true
+
+env:
+  GCS_BUCKET: ${{ vars.GCS_BUCKET_NAME }}
+
+jobs:
+  build-iceberg-extension:
+    name: Build Iceberg Extension
+    # Skip draft PRs
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    uses: ./.github/workflows/_iceberg_extension_distribution.yml
+    with:
+      # Version configuration - update here to upgrade DuckDB/extension-ci-tools versions
+      duckdb_version: v1.5.0
+      ci_tools_version: v1.5.0p
+      override_git_describe: v1.5.0
+
+  determine-deploy-path:
+    name: Determine Deploy Path
+    needs: build-iceberg-extension
+    if: |
+      always() &&
+      needs.build-iceberg-extension.result == 'success' &&
+      github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_path: ${{ steps.get-path.outputs.deploy_path }}
+    steps:
+      - name: Determine GCS deploy path
+        id: get-path
+        run: |
+          COMMIT_HASH="${{ github.sha }}"
+          SHORT_COMMIT="${COMMIT_HASH:0:7}"
+
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            DEPLOY_PATH="main/${SHORT_COMMIT}"
+          elif [[ "${{ github.ref }}" =~ ^refs/tags/ ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+            DEPLOY_PATH="tag/${TAG_NAME}"
+          else
+            BRANCH_NAME=$(echo "${{ github.ref_name }}" | sed 's/\//-/g')
+            DEPLOY_PATH="dev/${BRANCH_NAME}/${SHORT_COMMIT}"
+          fi
+
+          echo "deploy_path=$DEPLOY_PATH" >> $GITHUB_OUTPUT
+          echo "Deploying to: duckdb-iceberg/$DEPLOY_PATH"
+
+  deploy-to-gcs:
+    name: Deploy to GCS
+    needs: [build-iceberg-extension, determine-deploy-path]
+    uses: ./.github/workflows/_iceberg_deploy_gcs.yml
+    secrets:
+      GCS_HMAC_ACCESS_KEY_ID: ${{ secrets.GCS_HMAC_ACCESS_KEY_ID }}
+      GCS_HMAC_SECRET_ACCESS_KEY: ${{ secrets.GCS_HMAC_SECRET_ACCESS_KEY }}
+    with:
+      # Version parameter - keep in sync with env.DUCKDB_VERSION
+      duckdb_version: v1.5.0
+      deploy_path: ${{ needs.determine-deploy-path.outputs.deploy_path }}
+      exclude_archs: linux_amd64_musl
+
+  summary:
+    name: Deployment Summary
+    needs: [build-iceberg-extension, determine-deploy-path, deploy-to-gcs]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Print summary
+        run: |
+          echo "======================================="
+          echo "Build Complete"
+          echo "======================================="
+          echo ""
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo ""
+
+          if [ "${{ needs.build-iceberg-extension.result }}" = "success" ]; then
+            echo "✓ Build: SUCCESS"
+          else
+            echo "✗ Build: ${{ needs.build-iceberg-extension.result }}"
+          fi
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            if [ "${{ needs.deploy-to-gcs.result }}" = "success" ]; then
+              echo "✓ Deploy: SUCCESS"
+              echo ""
+              echo "Deployed to:"
+              echo "  gs://${GCS_BUCKET}/duckdb-iceberg/${{ needs.determine-deploy-path.outputs.deploy_path }}/"
+              echo ""
+              echo "Install URL template:"
+              echo "  gs://${GCS_BUCKET}/duckdb-iceberg/${{ needs.determine-deploy-path.outputs.deploy_path }}/<platform>/iceberg.duckdb_extension.gz"
+            else
+              echo "✗ Deploy: ${{ needs.deploy-to-gcs.result }}"
+            fi
+          else
+            echo "ℹ Deploy: Skipped (PR build only)"
+          fi
