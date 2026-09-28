@@ -173,7 +173,6 @@ void IcebergMultiFileList::ScanPuffinFile(const BoundIcebergManifestEntry &bound
 	VerifyPuffinDeletionVector(*caching_file_handle, offset, length);
 
 	auto buf_handle = caching_file_handle->Read(data, length, offset);
-	auto buffer_data = buf_handle.Ptr();
 
 	auto it = shared_state->positional_delete_data.find(data_file.referenced_data_file);
 	if (it != shared_state->positional_delete_data.end()) {
@@ -186,7 +185,7 @@ void IcebergMultiFileList::ScanPuffinFile(const BoundIcebergManifestEntry &bound
 	}
 	//! NOTE: assign, don't emplace, deletion vectors take priority over any remaining positional delete files
 	shared_state->positional_delete_data[data_file.referenced_data_file] =
-	    IcebergDeletionVectorData::FromBlob(bound_entry, buffer_data, length);
+	    IcebergDeletionVectorData::FromBlob(bound_entry, data, length);
 }
 
 idx_t IcebergDeletionVector::Filter(row_t start_row_index, idx_t count, SelectionVector &result_sel) {

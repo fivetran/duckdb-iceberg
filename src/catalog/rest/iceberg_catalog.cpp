@@ -77,15 +77,20 @@ optional_ptr<SchemaCatalogEntry> IcebergCatalog::LookupSchema(CatalogTransaction
 
 optional_ptr<CatalogEntry> IcebergCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	optional_ptr<ClientContext> context = transaction.GetContext();
-	if (info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
-		throw NotImplementedException(
-		    "CREATE OR REPLACE not supported in DuckDB-Iceberg. Please use separate Drop and Create Statements");
-	}
-
 	D_ASSERT(context);
 
 	// Verify schema existence on the server first
 	bool schema_exists = IRCAPI::VerifySchemaExistence(*context, *this, info.schema);
+
+	if (info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT && schema_exists) {
+		DropInfo drop_info;
+		drop_info.type = CatalogType::SCHEMA_ENTRY;
+		drop_info.name = info.schema;
+		drop_info.cascade = false;
+		drop_info.if_not_found = OnEntryNotFound::RETURN_NULL;
+		DropSchema(*context, drop_info);
+		schema_exists = false;
+	}
 
 	if (schema_exists) {
 		if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {

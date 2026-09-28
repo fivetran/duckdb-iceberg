@@ -7,6 +7,7 @@
 
 #include "catalog/rest/api/catalog_api.hpp"
 #include "catalog/rest/iceberg_table_set.hpp"
+#include "catalog/rest/iceberg_view_set.hpp"
 
 namespace duckdb {
 class IcebergTransaction;
@@ -54,13 +55,13 @@ public:
 	void LoadProperties(ClientContext &context);
 
 private:
-	IcebergTableSet &GetCatalogSet(CatalogType type);
 	// does the schema actually exist? default is true, but this is set to false
 	// when a verify schema request is made.
 	bool exists;
 
 public:
 	IcebergTableSet tables;
+	IcebergViewSet views;
 	IcebergSchemaInformation schema_info;
 };
 

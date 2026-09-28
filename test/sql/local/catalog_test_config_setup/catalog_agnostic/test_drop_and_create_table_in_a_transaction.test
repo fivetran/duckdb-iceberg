@@ -62,13 +62,19 @@ create table duid as select range a from range(10);
 statement ok
 ROLLBACK
 
-statement error
+statement ok
 create or replace table duid (a int);
-----
-<REGEX>:.*Not implemented Error.*CREATE OR REPLACE not supported in DuckDB-Iceberg. Please use separate Drop and Create Statements.*
 
-statement error
+query I
+select count(*) from duid;
+----
+0
+
+statement ok
+drop table duid;
+
+statement ok
 create or replace schema new_schema;
-----
-<REGEX>:.*Not implemented Error.*CREATE OR REPLACE not supported in DuckDB-Iceberg. Please use separate Drop and Create Statements.*
 
+statement ok
+drop schema new_schema;

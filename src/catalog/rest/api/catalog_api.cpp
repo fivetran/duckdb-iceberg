@@ -13,8 +13,13 @@
 #include "catalog/rest/catalog_entry/schema/iceberg_schema_entry.hpp"
 #include "catalog/rest/catalog_entry/table/iceberg_table_entry.hpp"
 #include "common/iceberg_utils.hpp"
+#include "rest_catalog/objects/load_view_result.hpp"
+#include "rest_catalog/objects/table_identifier.hpp"
 #include "catalog/rest/api/api_utils.hpp"
 #include "catalog/rest/storage/iceberg_authorization.hpp"
+
+#include "catalog/rest/api/create_view/iceberg_create_view_request.hpp"
+#include "catalog/rest/api/replace_view/iceberg_replace_view_request.hpp"
 
 #include <sys/stat.h>
 
@@ -581,4 +586,334 @@ rest_api_objects::CatalogConfig IRCAPI::GetCatalogConfig(ClientContext &context,
 	return rest_api_objects::CatalogConfig::FromJSON(root);
 }
 
+bool IRCAPI::VerifyViewExistence(ClientContext &context, IcebergCatalog &catalog, const IcebergSchemaEntry &schema,
+                                 const string &view) {
+	auto schema_name = IRCPathComponent::NamespaceComponent(schema.namespace_items);
+
+	auto url_builder = catalog.GetBaseUrl();
+	url_builder.AddPrefixComponent(catalog.prefix, catalog.prefix_is_one_component);
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("namespaces"));
+	url_builder.AddPathComponent(std::move(schema_name));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("views"));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent(view));
+	bool execute_head = catalog.supported_urls.find("HEAD /v1/{prefix}/namespaces/{namespace}/views/{view}") !=
+	                    catalog.supported_urls.end();
+	return VerifyResponse(context, catalog, url_builder, execute_head);
+}
+
+rest_api_objects::LoadViewResult IRCAPI::CreateView(ClientContext &context, IcebergCatalog &catalog,
+                                                    IcebergSchemaEntry &schema, const string &view_name,
+                                                    const string &view_sql,
+                                                    shared_ptr<IcebergTableSchema> view_schema) {
+	// Build URL: POST /v1/{prefix}/namespaces/{namespace}/views
+	auto schema_namespace = IRCPathComponent::NamespaceComponent(schema.namespace_items);
+
+	auto url_builder = catalog.GetBaseUrl();
+	url_builder.AddPrefixComponent(catalog.prefix, catalog.prefix_is_one_component);
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("namespaces"));
+	url_builder.AddPathComponent(std::move(schema_namespace));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("views"));
+
+	// Build CreateViewRequest JSON
+	std::unique_ptr<yyjson_mut_doc, YyjsonDocDeleter> doc_p(yyjson_mut_doc_new(nullptr));
+	yyjson_mut_doc *doc = doc_p.get();
+	auto root_object = yyjson_mut_obj(doc);
+	yyjson_mut_doc_set_root(doc, root_object);
+	auto create_view_request =
+	    make_uniq<IcebergCreateViewRequest>(view_name, view_sql, view_schema, schema.namespace_items);
+	auto create_view_json = create_view_request->CreateViewToJSON(std::move(doc_p));
+
+	try {
+		HTTPHeaders headers(*context.db);
+		headers.Insert("Content-Type", "application/json");
+		auto response =
+		    catalog.auth_handler->Request(RequestType::POST_REQUEST, context, url_builder, headers, create_view_json);
+
+		if (response->status != HTTPStatusCode::OK_200) {
+			throw HTTPException(
+			    *response,
+			    "CreateView request to '%s' returned a non-200 status code (%s), with reason: %s. Response body: %s",
+			    url_builder.GetURLEncoded(), EnumUtil::ToString(response->status), response->reason, response->body);
+		}
+		std::unique_ptr<yyjson_doc, YyjsonDocDeleter> doc(ICUtils::APIResultToDoc(response->body));
+		auto *root = yyjson_doc_get_root(doc.get());
+		auto load_view_result = rest_api_objects::LoadViewResult::FromJSON(root);
+		return load_view_result;
+	} catch (const HTTPException &) {
+		throw; // Re-throw HTTP exceptions as-is
+	} catch (const std::exception &e) {
+		throw HTTPException(StringUtil::Format("CreateView request to '%s' failed with error: %s",
+		                                       url_builder.GetURLEncoded(), e.what()));
+	}
+}
+
+rest_api_objects::LoadViewResult IRCAPI::ReplaceView(ClientContext &context, IcebergCatalog &catalog,
+                                                     IcebergSchemaEntry &schema, const string &view_name,
+                                                     const string &view_sql, shared_ptr<IcebergTableSchema> view_schema,
+                                                     const rest_api_objects::LoadViewResult &existing_view) {
+	// Build URL: POST /v1/{prefix}/namespaces/{namespace}/views/{view}
+	auto schema_namespace = IRCPathComponent::NamespaceComponent(schema.namespace_items);
+
+	auto url_builder = catalog.GetBaseUrl();
+	url_builder.AddPrefixComponent(catalog.prefix, catalog.prefix_is_one_component);
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("namespaces"));
+	url_builder.AddPathComponent(std::move(schema_namespace));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("views"));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent(view_name));
+
+	// Build CommitViewRequest JSON
+	std::unique_ptr<yyjson_mut_doc, YyjsonDocDeleter> doc_p(yyjson_mut_doc_new(nullptr));
+	yyjson_mut_doc *doc = doc_p.get();
+	auto root_object_replace = yyjson_mut_obj(doc);
+	yyjson_mut_doc_set_root(doc, root_object_replace);
+
+	// Find the maximum version-id in the existing view
+	int32_t max_version_id = 0;
+	for (const auto &version : existing_view.metadata.versions) {
+		if (version.version_id > max_version_id) {
+			max_version_id = version.version_id;
+		}
+	}
+	int32_t new_version_id = max_version_id + 1;
+
+	// view_schema->schema_id == -1 signals a new schema; compute the next available ID to pass explicitly.
+	int32_t new_schema_id = -1;
+	if (view_schema->schema_id == -1) {
+		int32_t max_schema_id = 0;
+		for (const auto &s : existing_view.metadata.schemas) {
+			if (s.object_1.schema_id > max_schema_id) {
+				max_schema_id = s.object_1.schema_id;
+			}
+		}
+		new_schema_id = max_schema_id + 1;
+	}
+
+	auto replace_view_request =
+	    make_uniq<IcebergReplaceViewRequest>(view_name, existing_view.metadata.view_uuid, view_sql, new_version_id,
+	                                         view_schema, new_schema_id, schema.namespace_items);
+	auto replace_view_json = replace_view_request->ReplaceViewToJSON(std::move(doc_p));
+
+	try {
+		HTTPHeaders headers(*context.db);
+		headers.Insert("Content-Type", "application/json");
+		auto response =
+		    catalog.auth_handler->Request(RequestType::POST_REQUEST, context, url_builder, headers, replace_view_json);
+
+		if (response->status != HTTPStatusCode::OK_200) {
+			throw HTTPException(
+			    *response,
+			    "ReplaceView request to '%s' returned a non-200 status code (%s), with reason: %s. Response body: %s",
+			    url_builder.GetURLEncoded(), EnumUtil::ToString(response->status), response->reason, response->body);
+		}
+
+		std::unique_ptr<yyjson_doc, YyjsonDocDeleter> response_doc(ICUtils::APIResultToDoc(response->body));
+		auto *root = yyjson_doc_get_root(response_doc.get());
+		return rest_api_objects::LoadViewResult::FromJSON(root);
+	} catch (const HTTPException &) {
+		throw; // Re-throw HTTP exceptions as-is
+	} catch (const std::exception &e) {
+		throw HTTPException(StringUtil::Format("ReplaceView request to '%s' failed with error: %s",
+		                                       url_builder.GetURLEncoded(), e.what()));
+	}
+}
+
+rest_api_objects::LoadViewResult IRCAPI::SetCurrentViewVersion(ClientContext &context, IcebergCatalog &catalog,
+                                                               IcebergSchemaEntry &schema, const string &view_name,
+                                                               int32_t version_id,
+                                                               const rest_api_objects::LoadViewResult &existing_view) {
+	// Build URL: POST /v1/{prefix}/namespaces/{namespace}/views/{view}
+	auto schema_namespace = IRCPathComponent::NamespaceComponent(schema.namespace_items);
+
+	auto url_builder = catalog.GetBaseUrl();
+	url_builder.AddPrefixComponent(catalog.prefix, catalog.prefix_is_one_component);
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("namespaces"));
+	url_builder.AddPathComponent(std::move(schema_namespace));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("views"));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent(view_name));
+
+	// Build CommitViewRequest JSON for setting current version
+	std::unique_ptr<yyjson_mut_doc, YyjsonDocDeleter> doc_p(yyjson_mut_doc_new(nullptr));
+	yyjson_mut_doc *doc = doc_p.get();
+	auto root_object = yyjson_mut_obj(doc);
+	yyjson_mut_doc_set_root(doc, root_object);
+
+	auto requirements_arr = yyjson_mut_obj_add_arr(doc, root_object, "requirements");
+	auto updates_arr = yyjson_mut_obj_add_arr(doc, root_object, "updates");
+
+	auto req_obj = yyjson_mut_arr_add_obj(doc, requirements_arr);
+	yyjson_mut_obj_add_strcpy(doc, req_obj, "type", "assert-view-uuid");
+	yyjson_mut_obj_add_strcpy(doc, req_obj, "uuid", existing_view.metadata.view_uuid.c_str());
+
+	auto update_obj = yyjson_mut_arr_add_obj(doc, updates_arr);
+	yyjson_mut_obj_add_strcpy(doc, update_obj, "action", "set-current-view-version");
+	yyjson_mut_obj_add_int(doc, update_obj, "view-version-id", version_id);
+
+	auto data = yyjson_mut_val_write_opts(root_object, YYJSON_WRITE_ALLOW_INF_AND_NAN, nullptr, nullptr, nullptr);
+	if (!data) {
+		throw InternalException("Could not create JSON representation of view commit request");
+	}
+	string request_json(data);
+	free(data);
+
+	try {
+		HTTPHeaders headers(*context.db);
+		headers.Insert("Content-Type", "application/json");
+		auto response =
+		    catalog.auth_handler->Request(RequestType::POST_REQUEST, context, url_builder, headers, request_json);
+
+		if (response->status != HTTPStatusCode::OK_200) {
+			throw HTTPException(*response,
+			                    "SetCurrentViewVersion request to '%s' returned a non-200 status code (%s), with "
+			                    "reason: %s. Response body: %s",
+			                    url_builder.GetURLEncoded(), EnumUtil::ToString(response->status), response->reason,
+			                    response->body);
+		}
+
+		std::unique_ptr<yyjson_doc, YyjsonDocDeleter> response_doc(ICUtils::APIResultToDoc(response->body));
+		auto *root = yyjson_doc_get_root(response_doc.get());
+		return rest_api_objects::LoadViewResult::FromJSON(root);
+	} catch (const HTTPException &) {
+		throw; // Re-throw HTTP exceptions as-is
+	} catch (const std::exception &e) {
+		throw HTTPException(StringUtil::Format("SetCurrentViewVersion request to '%s' failed with error: %s",
+		                                       url_builder.GetURLEncoded(), e.what()));
+	}
+}
+
+vector<rest_api_objects::TableIdentifier> IRCAPI::GetViews(ClientContext &context, IcebergCatalog &catalog,
+                                                           const IcebergSchemaEntry &schema) {
+	auto schema_name = IRCPathComponent::NamespaceComponent(schema.namespace_items);
+
+	auto url_builder = catalog.GetBaseUrl();
+	url_builder.AddPrefixComponent(catalog.prefix, catalog.prefix_is_one_component);
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("namespaces"));
+	url_builder.AddPathComponent(std::move(schema_name));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("views"));
+
+	HTTPHeaders headers;
+	auto response = catalog.auth_handler->Request(RequestType::GET_REQUEST, context, url_builder, headers);
+	if (!response->Success()) {
+		if (response->status == HTTPStatusCode::Forbidden_403 ||
+		    response->status == HTTPStatusCode::Unauthorized_401 ||
+		    response->status == HTTPStatusCode::NotFound_404) {
+			// Match GetTables and don't fail the whole SHOW TABLES / schema scan
+			DUCKDB_LOG_WARNING(context, "GET %s returned status code %s", url_builder.GetURLEncoded(),
+			                   EnumUtil::ToString(response->status));
+			return {};
+		}
+		throw HTTPException(
+		    *response, "GetViews request to '%s' returned a non-200 status code (%s), with reason: %s, body: %s",
+		    url_builder.GetURLEncoded(), EnumUtil::ToString(response->status), response->reason, response->body);
+	}
+
+	std::unique_ptr<yyjson_doc, YyjsonDocDeleter> doc(ICUtils::APIResultToDoc(response->body));
+	auto *root = yyjson_doc_get_root(doc.get());
+	auto identifiers_array = yyjson_obj_get(root, "identifiers");
+	if (!identifiers_array || !yyjson_is_arr(identifiers_array)) {
+		throw InvalidInputException("GetViews endpoint returned an invalid response, expected 'identifiers' array");
+	}
+
+	vector<rest_api_objects::TableIdentifier> result;
+	size_t idx, max;
+	yyjson_val *val;
+	yyjson_arr_foreach(identifiers_array, idx, max, val) {
+		result.push_back(rest_api_objects::TableIdentifier::FromJSON(val));
+	}
+	return result;
+}
+
+rest_api_objects::LoadViewResult IRCAPI::GetView(ClientContext &context, IcebergCatalog &catalog,
+                                                 const IcebergSchemaEntry &schema, const string &view_name) {
+	auto schema_namespace = IRCPathComponent::NamespaceComponent(schema.namespace_items);
+
+	auto url_builder = catalog.GetBaseUrl();
+	url_builder.AddPrefixComponent(catalog.prefix, catalog.prefix_is_one_component);
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("namespaces"));
+	url_builder.AddPathComponent(std::move(schema_namespace));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("views"));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent(view_name));
+
+	HTTPHeaders headers;
+	auto response = catalog.auth_handler->Request(RequestType::GET_REQUEST, context, url_builder, headers);
+	if (response->status != HTTPStatusCode::OK_200) {
+		throw HTTPException(
+		    *response, "GetView request to '%s' returned a non-200 status code (%s), with reason: %s, body: %s",
+		    url_builder.GetURLEncoded(), EnumUtil::ToString(response->status), response->reason, response->body);
+	}
+
+	std::unique_ptr<yyjson_doc, YyjsonDocDeleter> doc(ICUtils::APIResultToDoc(response->body));
+	auto *root = yyjson_doc_get_root(doc.get());
+	auto load_view_result = rest_api_objects::LoadViewResult::FromJSON(root);
+
+	return load_view_result;
+}
+
+void IRCAPI::DropView(ClientContext &context, IcebergCatalog &catalog, const vector<string> &schema,
+                      const string &view_name) {
+	auto schema_name = IRCPathComponent::NamespaceComponent(schema);
+
+	auto url_builder = catalog.GetBaseUrl();
+	url_builder.AddPrefixComponent(catalog.prefix, catalog.prefix_is_one_component);
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("namespaces"));
+	url_builder.AddPathComponent(std::move(schema_name));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("views"));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent(view_name));
+
+	HTTPHeaders headers;
+	auto response = catalog.auth_handler->Request(RequestType::DELETE_REQUEST, context, url_builder, headers);
+	if (response->status != HTTPStatusCode::NoContent_204 && response->status != HTTPStatusCode::OK_200) {
+		throw HTTPException(
+		    *response, "DropView request to '%s' returned a non-success status code (%s), with reason: %s, body: %s",
+		    url_builder.GetURLEncoded(), EnumUtil::ToString(response->status), response->reason, response->body);
+	}
+}
+
+void IRCAPI::RenameView(ClientContext &context, IcebergCatalog &catalog, const vector<string> &schema,
+                        const string &source_view, const string &dest_view) {
+	// Build the URL: POST /v1/{prefix}/views/rename
+	auto url_builder = catalog.GetBaseUrl();
+	url_builder.AddPrefixComponent(catalog.prefix, catalog.prefix_is_one_component);
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("views"));
+	url_builder.AddPathComponent(IRCPathComponent::RegularComponent("rename"));
+
+	// Build the JSON payload
+	std::unique_ptr<yyjson_mut_doc, YyjsonDocDeleter> doc_p(yyjson_mut_doc_new(nullptr));
+	yyjson_mut_doc *doc = doc_p.get();
+	auto root_object = yyjson_mut_doc_get_root(doc);
+
+	// Source identifier
+	auto source_obj = yyjson_mut_obj_add_obj(doc, root_object, "source");
+	auto source_namespace_arr = yyjson_mut_obj_add_arr(doc, source_obj, "namespace");
+	for (const auto &item : schema) {
+		yyjson_mut_arr_add_strcpy(doc, source_namespace_arr, item.c_str());
+	}
+	yyjson_mut_obj_add_strcpy(doc, source_obj, "name", source_view.c_str());
+
+	// Destination identifier
+	auto dest_obj = yyjson_mut_obj_add_obj(doc, root_object, "destination");
+	auto dest_namespace_arr = yyjson_mut_obj_add_arr(doc, dest_obj, "namespace");
+	for (const auto &item : schema) {
+		yyjson_mut_arr_add_strcpy(doc, dest_namespace_arr, item.c_str());
+	}
+	yyjson_mut_obj_add_strcpy(doc, dest_obj, "name", dest_view.c_str());
+
+	// Convert JSON to string
+	auto data = yyjson_mut_val_write_opts(root_object, YYJSON_WRITE_ALLOW_INF_AND_NAN, nullptr, nullptr, nullptr);
+	if (!data) {
+		throw InternalException("Could not create JSON representation of RenameView request");
+	}
+	string request_json(data);
+	free(data);
+
+	HTTPHeaders headers(*context.db);
+	headers.Insert("Content-Type", "application/json");
+	auto response =
+	    catalog.auth_handler->Request(RequestType::POST_REQUEST, context, url_builder, headers, request_json);
+
+	if (response->status != HTTPStatusCode::NoContent_204 && response->status != HTTPStatusCode::OK_200) {
+		throw InvalidConfigurationException(
+		    "RenameView request to '%s' returned a non-success status code (%s), with reason: %s, body: %s",
+		    url_builder.GetURLEncoded(), EnumUtil::ToString(response->status), response->reason, response->body);
+	}
+}
 } // namespace duckdb

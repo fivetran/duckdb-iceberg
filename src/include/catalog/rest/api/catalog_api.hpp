@@ -13,6 +13,7 @@ namespace duckdb {
 class IcebergCatalog;
 class IcebergSchemaEntry;
 class IcebergTableEntry;
+struct IcebergTableSchema;
 
 struct IRCAPISchema {
 	//! The (potentially multiple) levels that the namespace is made up of
@@ -42,9 +43,13 @@ public:
 	static const string API_VERSION_1;
 	static vector<rest_api_objects::TableIdentifier> GetTables(ClientContext &context, IcebergCatalog &catalog,
 	                                                           const IcebergSchemaEntry &schema);
+	static vector<rest_api_objects::TableIdentifier> GetViews(ClientContext &context, IcebergCatalog &catalog,
+	                                                          const IcebergSchemaEntry &schema);
 	static bool VerifyResponse(ClientContext &context, IcebergCatalog &catalog, IRCEndpointBuilder &url_builder,
 	                           bool execute_head);
 	static bool VerifySchemaExistence(ClientContext &context, IcebergCatalog &catalog, const string &schema);
+	static bool VerifyViewExistence(ClientContext &context, IcebergCatalog &catalog, const IcebergSchemaEntry &schema,
+	                                const string &view);
 	static bool VerifyTableExistence(ClientContext &context, IcebergCatalog &catalog, const IcebergSchemaEntry &schema,
 	                                 const string &table);
 	static vector<string> ParseSchemaName(const string &namespace_name);
@@ -73,6 +78,25 @@ public:
 	                                                        const IcebergTableEntry &table);
 	static rest_api_objects::CatalogConfig GetCatalogConfig(ClientContext &context, IcebergCatalog &catalog,
 	                                                        const string &warehouse);
+	static rest_api_objects::LoadViewResult CreateView(ClientContext &context, IcebergCatalog &catalog,
+	                                                   IcebergSchemaEntry &schema, const string &view_name,
+	                                                   const string &view_sql,
+	                                                   shared_ptr<IcebergTableSchema> view_schema);
+	static rest_api_objects::LoadViewResult ReplaceView(ClientContext &context, IcebergCatalog &catalog,
+	                                                    IcebergSchemaEntry &schema, const string &view_name,
+	                                                    const string &view_sql,
+	                                                    shared_ptr<IcebergTableSchema> view_schema,
+	                                                    const rest_api_objects::LoadViewResult &existing_view);
+	static rest_api_objects::LoadViewResult
+	SetCurrentViewVersion(ClientContext &context, IcebergCatalog &catalog, IcebergSchemaEntry &schema,
+	                      const string &view_name, int32_t version_id,
+	                      const rest_api_objects::LoadViewResult &existing_view);
+	static rest_api_objects::LoadViewResult GetView(ClientContext &context, IcebergCatalog &catalog,
+	                                                const IcebergSchemaEntry &schema, const string &view_name);
+	static void DropView(ClientContext &context, IcebergCatalog &catalog, const vector<string> &schema,
+	                     const string &view_name);
+	static void RenameView(ClientContext &context, IcebergCatalog &catalog, const vector<string> &schema,
+	                       const string &source_view, const string &dest_view);
 };
 
 } // namespace duckdb

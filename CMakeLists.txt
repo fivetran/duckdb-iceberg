@@ -25,6 +25,13 @@ set(EXTENSION_SOURCES
 	src/catalog/rest/api/api_utils.cpp
 	src/catalog/rest/api/catalog_api.cpp
 	src/catalog/rest/api/catalog_utils.cpp
+src/catalog/rest/api/iceberg_json_utils.cpp 
+
+	src/catalog/rest/api/create_view/iceberg_create_view_request.cpp
+	src/catalog/rest/api/replace_view/iceberg_replace_view_request.cpp
+	src/catalog/rest/catalog_entry/view/iceberg_view_entry.cpp
+	src/catalog/rest/iceberg_view_set.cpp
+
 	src/catalog/rest/api/iceberg_add_snapshot.cpp
 	src/catalog/rest/api/iceberg_create_table_request.cpp
 	src/catalog/rest/api/iceberg_table_update.cpp
